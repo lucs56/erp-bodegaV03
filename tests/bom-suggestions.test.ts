@@ -1,0 +1,4 @@
+import test from "node:test";import assert from "node:assert/strict";import {suggestBomFromProgram}from"../lib/bom-suggestions.ts";
+const base={productCode:"P1",action:"FRACCIONAR",unitsPerCase:"6",materials:{bottle:"B1",closure:"",capsuleOrCap:"T1",case:"C1",frontLabel:"",backLabel:""}} as never;
+test("sugiere solo insumos informados y calcula consumo de caja",()=>{const result=suggestBomFromProgram([base],"P1");assert.equal(result.items.length,3);assert.equal(result.items.find(item=>item.materialCode==="C1")?.quantity,1/6);});
+test("marca como parcial cuando una operación todavía no tiene insumos",()=>{const empty={...base,materials:{bottle:"",closure:"",capsuleOrCap:"",case:"",frontLabel:"",backLabel:""}} as never;const result=suggestBomFromProgram([base,empty],"P1");assert.equal(result.complete,false);assert.equal(result.populatedRows,1);});

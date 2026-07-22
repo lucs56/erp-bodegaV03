@@ -1,0 +1,183 @@
+[debug] [2026-07-17T17:51:12.668Z] ----------------------------------------------------------------------
+[debug] [2026-07-17T17:51:12.671Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\bin\firebase.js init
+[debug] [2026-07-17T17:51:12.671Z] CLI Version:   15.24.0
+[debug] [2026-07-17T17:51:12.671Z] Platform:      win32
+[debug] [2026-07-17T17:51:12.672Z] Node Version:  v22.16.0
+[debug] [2026-07-17T17:51:12.672Z] Detected Agent: unknown
+[debug] [2026-07-17T17:51:12.672Z] Time:          Fri Jul 17 2026 14:51:12 GMT-0300 (hora estándar de Argentina)
+[debug] [2026-07-17T17:51:12.672Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-07-17T17:51:12.682Z] >>> [apiv2][query] GET https://firebase-public.firebaseio.com/cli.json [none]
+[info] 
+     ######## #### ########  ######## ########     ###     ######  ########
+     ##        ##  ##     ## ##       ##     ##  ##   ##  ##       ##
+     ######    ##  ########  ######   ########  #########  ######  ######
+     ##        ##  ##    ##  ##       ##     ## ##     ##       ## ##
+     ##       #### ##     ## ######## ########  ##     ##  ######  ########
+
+You're about to initialize a Firebase project in this directory:
+
+  C:\Users\torre\Downloads\erp-insumos-bodega-v27
+
+[debug] [2026-07-17T17:51:14.128Z] <<< [apiv2][status] GET https://firebase-public.firebaseio.com/cli.json 200
+[debug] [2026-07-17T17:51:14.128Z] <<< [apiv2][body] GET https://firebase-public.firebaseio.com/cli.json {"cloudBuildErrorAfter":1594252800000,"cloudBuildWarnAfter":1590019200000,"defaultNode10After":1594252800000,"minVersion":"3.0.5","node8DeploysDisabledAfter":1613390400000,"node8RuntimeDisabledAfter":1615809600000,"node8WarnAfter":1600128000000}
+[info] 
+=== Project Setup
+[info] 
+[info] First, let's associate this project directory with a Firebase project.
+[info] You can create multiple project aliases by running firebase use --add, 
+[info] 
+[debug] [2026-07-17T17:52:53.504Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-07-17T17:52:53.504Z] > authorizing via signed-in user (torressosa56@gmail.com)
+[debug] [2026-07-17T17:52:53.505Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:52:53.505Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:52:53.505Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:52:53.506Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:52:53.506Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:52:53.691Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:52:53.691Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:52:53.691Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects pageSize=100
+[debug] [2026-07-17T17:52:53.851Z] <<< [apiv2][status] GET https://firebase.googleapis.com/v1beta1/projects 401
+[debug] [2026-07-17T17:52:53.852Z] <<< [apiv2][body] GET https://firebase.googleapis.com/v1beta1/projects [omitted]
+[debug] [2026-07-17T17:52:53.852Z] Got a 401 Unauthenticated error for a call that required authentication. Refreshing tokens.
+[debug] [2026-07-17T17:52:53.852Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:52:53.852Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:52:53.852Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:52:53.852Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:52:53.852Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:52:53.909Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:52:53.909Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:52:53.910Z] Request to https://firebase.googleapis.com/v1beta1/projects?pageSize=100 had HTTP Error: 401, Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.
+[debug] [2026-07-17T17:52:54.046Z] FirebaseError: Request to https://firebase.googleapis.com/v1beta1/projects?pageSize=100 had HTTP Error: 401, Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.
+    at responseToError (C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\responseToError.js:53:12)
+    at RetryOperation._fn (C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\apiv2.js:415:77)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+[error] 
+[error] Error: Failed to list Firebase projects. See firebase-debug.log for more info.
+[debug] [2026-07-17T17:53:00.648Z] ----------------------------------------------------------------------
+[debug] [2026-07-17T17:53:00.650Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\bin\firebase.js init
+[debug] [2026-07-17T17:53:00.650Z] CLI Version:   15.24.0
+[debug] [2026-07-17T17:53:00.650Z] Platform:      win32
+[debug] [2026-07-17T17:53:00.650Z] Node Version:  v22.16.0
+[debug] [2026-07-17T17:53:00.650Z] Detected Agent: unknown
+[debug] [2026-07-17T17:53:00.650Z] Time:          Fri Jul 17 2026 14:53:00 GMT-0300 (hora estándar de Argentina)
+[debug] [2026-07-17T17:53:00.651Z] ----------------------------------------------------------------------
+[debug] 
+[info] 
+     ######## #### ########  ######## ########     ###     ######  ########
+     ##        ##  ##     ## ##       ##     ##  ##   ##  ##       ##
+     ######    ##  ########  ######   ########  #########  ######  ######
+     ##        ##  ##    ##  ##       ##     ## ##     ##       ## ##
+     ##       #### ##     ## ######## ########  ##     ##  ######  ########
+
+You're about to initialize a Firebase project in this directory:
+
+  C:\Users\torre\Downloads\erp-insumos-bodega-v27
+
+[info] 
+=== Project Setup
+[info] 
+[info] First, let's associate this project directory with a Firebase project.
+[info] You can create multiple project aliases by running firebase use --add, 
+[info] 
+[info] i  If you want to create a project in a Google Cloud organization or folder, please use "firebase projects:create" instead, and return to this command when you've created the project. 
+[debug] [2026-07-17T17:53:16.182Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-07-17T17:53:16.182Z] > authorizing via signed-in user (torressosa56@gmail.com)
+[debug] [2026-07-17T17:53:29.809Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:29.809Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:29.809Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:53:29.811Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:53:29.812Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:30.005Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:53:30.005Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:30.005Z] >>> [apiv2][query] POST https://firebase.googleapis.com/v1/projects:checkProjectId [none]
+[debug] [2026-07-17T17:53:30.005Z] >>> [apiv2][body] POST https://firebase.googleapis.com/v1/projects:checkProjectId {"proposedId":"erp-insumos-bodega"}
+[debug] [2026-07-17T17:53:30.166Z] <<< [apiv2][status] POST https://firebase.googleapis.com/v1/projects:checkProjectId 401
+[debug] [2026-07-17T17:53:30.166Z] <<< [apiv2][body] POST https://firebase.googleapis.com/v1/projects:checkProjectId {"error":{"code":401,"message":"Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.","status":"UNAUTHENTICATED"}}
+[debug] [2026-07-17T17:53:30.166Z] Got a 401 Unauthenticated error for a call that required authentication. Refreshing tokens.
+[debug] [2026-07-17T17:53:30.166Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:30.166Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:30.166Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:53:30.166Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:53:30.166Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:30.225Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:53:30.225Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:30.226Z] Couldn't check if project ID erp-insumos-bodega is available. Original error: FirebaseError: Failed to check if project ID is available. See firebase-debug.log for more info.
+[debug] [2026-07-17T17:53:37.735Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:37.735Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:37.735Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:53:37.735Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:53:37.735Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:37.874Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:53:37.874Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:37.875Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects [none]
+[debug] [2026-07-17T17:53:37.875Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects {"projectId":"erp-insumos-bodega","name":"erp-insumos-bodega"}
+[debug] [2026-07-17T17:53:38.766Z] <<< [apiv2][status] POST https://cloudresourcemanager.googleapis.com/v1/projects 401
+[debug] [2026-07-17T17:53:38.766Z] <<< [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects {"error":{"code":401,"message":"Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.","status":"UNAUTHENTICATED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ACCESS_TOKEN_TYPE_UNSUPPORTED","metadata":{"method":"google.cloudresourcemanager.v1.Projects.CreateProject","service":"cloudresourcemanager.googleapis.com"}}]}}
+[debug] [2026-07-17T17:53:38.766Z] Got a 401 Unauthenticated error for a call that required authentication. Refreshing tokens.
+[debug] [2026-07-17T17:53:38.766Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:38.766Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:53:38.766Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:53:38.766Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:53:38.766Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:38.842Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:53:38.842Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:53:38.978Z] FirebaseError: Request to https://cloudresourcemanager.googleapis.com/v1/projects had HTTP Error: 401, Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.
+    at responseToError (C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\responseToError.js:53:12)
+    at RetryOperation._fn (C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\apiv2.js:415:77)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+[error] 
+[error] Error: Failed to create project. See firebase-debug.log for more info.
+[debug] [2026-07-17T17:53:47.941Z] ----------------------------------------------------------------------
+[debug] [2026-07-17T17:53:47.943Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\bin\firebase.js init
+[debug] [2026-07-17T17:53:47.943Z] CLI Version:   15.24.0
+[debug] [2026-07-17T17:53:47.943Z] Platform:      win32
+[debug] [2026-07-17T17:53:47.943Z] Node Version:  v22.16.0
+[debug] [2026-07-17T17:53:47.943Z] Detected Agent: unknown
+[debug] [2026-07-17T17:53:47.944Z] Time:          Fri Jul 17 2026 14:53:47 GMT-0300 (hora estándar de Argentina)
+[debug] [2026-07-17T17:53:47.944Z] ----------------------------------------------------------------------
+[debug] 
+[info] 
+     ######## #### ########  ######## ########     ###     ######  ########
+     ##        ##  ##     ## ##       ##     ##  ##   ##  ##       ##
+     ######    ##  ########  ######   ########  #########  ######  ######
+     ##        ##  ##    ##  ##       ##     ## ##     ##       ## ##
+     ##       #### ##     ## ######## ########  ##     ##  ######  ########
+
+You're about to initialize a Firebase project in this directory:
+
+  C:\Users\torre\Downloads\erp-insumos-bodega-v27
+
+[info] 
+=== Project Setup
+[info] 
+[info] First, let's associate this project directory with a Firebase project.
+[info] You can create multiple project aliases by running firebase use --add, 
+[info] 
+[debug] [2026-07-17T17:54:00.767Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-07-17T17:54:00.767Z] > authorizing via signed-in user (torressosa56@gmail.com)
+[debug] [2026-07-17T17:54:00.776Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:54:00.776Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:54:00.776Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:54:00.778Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:54:00.778Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:54:00.971Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:54:00.971Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:54:00.971Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects pageSize=100
+[debug] [2026-07-17T17:54:01.111Z] <<< [apiv2][status] GET https://firebase.googleapis.com/v1beta1/projects 401
+[debug] [2026-07-17T17:54:01.111Z] <<< [apiv2][body] GET https://firebase.googleapis.com/v1beta1/projects [omitted]
+[debug] [2026-07-17T17:54:01.112Z] Got a 401 Unauthenticated error for a call that required authentication. Refreshing tokens.
+[debug] [2026-07-17T17:54:01.112Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:54:01.112Z] Checked if tokens are valid: false, expires at: 1764769716461
+[debug] [2026-07-17T17:54:01.112Z] > refreshing access token with scopes: []
+[debug] [2026-07-17T17:54:01.112Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-17T17:54:01.112Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:54:01.193Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-17T17:54:01.193Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-17T17:54:01.194Z] Request to https://firebase.googleapis.com/v1beta1/projects?pageSize=100 had HTTP Error: 401, Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.
+[debug] [2026-07-17T17:54:01.356Z] FirebaseError: Request to https://firebase.googleapis.com/v1beta1/projects?pageSize=100 had HTTP Error: 401, Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.
+    at responseToError (C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\responseToError.js:53:12)
+    at RetryOperation._fn (C:\Users\torre\AppData\Roaming\npm\node_modules\firebase-tools\lib\apiv2.js:415:77)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+[error] 
+[error] Error: Failed to list Firebase projects. See firebase-debug.log for more info.
