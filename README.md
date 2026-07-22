@@ -5,16 +5,31 @@
 ## Planificación mensual y navegación lateral
 
 - Nueva sección `Plan mensual`, separada de la programación semanal existente.
+- Muestra dos cargas independientes y siempre visibles: `Archivo de estimado mensual` y `Archivo de pendientes de recepción`.
 - Importa estimados en formato largo (`Mes`, `Código producto`, `Botellas`, `Cj x`) o ancho, con columnas `Agosto`, `Septiembre`, etc.
+- Importa un segundo Excel de pendientes con código de insumo, cantidad por recibir, mes o fecha de entrega, proveedor y OC/pedido.
+- Reemplazar uno de los archivos conserva el otro en pantalla. El botón `Guardar ambos y calcular` confirma las dos listas juntas y evita que quede un cálculo a medias.
+- Valida cada archivo por separado, informa las filas rechazadas y conserva los datos anteriores cuando un archivo no contiene ninguna fila válida.
 - Relaciona automáticamente el código del vino con su BOM y obtiene los códigos de botellas, cierres, cápsulas, etiquetas, cajas y demás insumos.
+- Incluye en la proyección los insumos de las etapas `FRACCIONAR`, `VESTIR` y `ENCAJONAR` del producto terminado.
 - Calcula cajas enteras según presentación de 6 o 12 botellas.
-- Importa las compras pendientes de recepción con mes previsto, proveedor y orden de compra.
 - Proyecta mes por mes: `necesidad bruta − stock − pendiente por llegar = compra a planificar`.
 - El saldo disponible se arrastra al mes siguiente y una entrega futura no cubre consumos anteriores.
 - Mantiene visible el stock desglosado por depósito y exporta programa, pendientes y plan de compras en un único Excel.
 - Programa y pendientes se guardan en las tablas D1 `monthly_plan_rows` e `incoming_materials`, creadas automáticamente sin alterar los datos existentes.
+- La API admite hasta 5.000 filas de estimado y 10.000 filas de pendientes por guardado, usando inserciones masivas para reducir tiempo de CPU en Cloudflare.
 - La navegación principal pasa a una barra lateral en escritorio y conserva el formato adaptable en pantallas pequeñas.
 - Incluye `public/examples/Plantilla-Estimado-Mensual.xlsx` y `public/examples/Plantilla-Pendientes-Recepcion.xlsx` para comenzar las pruebas.
+
+### Flujo de prueba
+
+1. Ingresar a `Plan mensual`.
+2. En la primera tarjeta, subir el Excel del estimado de productos.
+3. En la segunda tarjeta, subir el Excel de pendientes de recepción.
+4. Revisar la cantidad de filas válidas indicada en cada tarjeta.
+5. Presionar `Guardar ambos y calcular`.
+6. Abrir `Resultado` para revisar necesidad, stock, pendientes aplicados y compra sugerida.
+7. Usar `Exportar Excel` para descargar las tres hojas consolidadas.
 
 ## Corrección de pantalla blanca v33
 

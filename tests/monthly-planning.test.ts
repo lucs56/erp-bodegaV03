@@ -25,3 +25,20 @@ test("importa pendientes con mes de entrega",()=>{
   const parsed=parseIncomingRows([{"Código insumo":"B1","Descripción":"Botella","Cantidad pendiente":80_000,"Fecha entrega":"octubre 2026","OC":"45001"}],2026);
   assert.equal(parsed.items[0].expectedMonth,"2026-10");assert.equal(parsed.items[0].orderReference,"45001");
 });
+
+test("reconoce encabezados alternativos del archivo de pendientes",()=>{
+  const parsed=parseIncomingRows([{"Código artículo":"T20","Descripción insumo":"Tapón natural","Pendiente por recibir":"30.000","Fecha comprometida":"noviembre 2026","Razón social":"Proveedor Uno","Nro OC":"46002"}],2026);
+  assert.equal(parsed.errors.length,0);
+  assert.deepEqual(parsed.items.map(item=>[item.materialCode,item.quantity,item.expectedMonth,item.supplier,item.orderReference]),[["T20",30000,"2026-11","Proveedor Uno","46002"]]);
+});
+
+test("el estimado terminado incluye insumos de fraccionar, vestir y encajonar",()=>{
+  const plan=[{id:"1",month:"2026-08",productCode:"P1",productName:"Malbec",bottles:1_200,unitsPerBox:12 as const,notes:""}];
+  const boms=[{code:"P1",name:"Malbec",items:[
+    {materialCode:"B1",materialName:"Botella",category:"Botellas",quantity:1,unit:"unidad",action:"FRACCIONAR"},
+    {materialCode:"E1",materialName:"Etiqueta",category:"Etiquetas",quantity:1,unit:"unidad",action:"VESTIR"},
+    {materialCode:"C1",materialName:"Caja",category:"Cajas",quantity:1,unit:"unidad",action:"ENCAJONAR"},
+  ]}];
+  const result=calculateMonthlyPurchases(plan,boms,[],[]);
+  assert.deepEqual(result.lines.map(line=>[line.materialCode,line.grossRequirement]),[["B1",1200],["E1",1200],["C1",100]]);
+});
