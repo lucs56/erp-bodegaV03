@@ -13,7 +13,11 @@ import {
   type GeneralAssistantContext,
 } from "../lib/assistant";
 import {
-  parseMonthlyPurchaseSheets,
+  detectMonthlyPurchaseSources,
+  parseAutomaticMonthlyPurchaseSources,
+  type MonthlyPurchaseSourceFiles,
+  type MonthlyPurchaseSourceKind,
+  type MonthlyPurchaseSourceSet,
   type MonthlyPurchasePlanPayload,
 } from "../lib/monthly-purchases";
 
@@ -364,6 +368,11 @@ export default function Home() {
   const [monthlyPlan, setMonthlyPlan] = useState<StoredMonthlyPurchasePlan | null>(null);
   const [monthlyDraft, setMonthlyDraft] = useState<MonthlyPurchasePlanPayload | null>(null);
   const [monthlyQuery, setMonthlyQuery] = useState("");
+  const [monthlyRounding, setMonthlyRounding] = useState(10_000);
+  const [monthlySources, setMonthlySources] = useState<{
+    sheets: MonthlyPurchaseSourceSet;
+    files: MonthlyPurchaseSourceFiles;
+  }>({ sheets: {}, files: {} });
   const [monthlyState, setMonthlyState] = useState({
     loading: false,
     message: "",
@@ -617,6 +626,15 @@ export default function Home() {
   }, [monthlyPlan, monthlyQuery]);
   const monthlyShortages = useMemo(
     () => monthlyPlan?.analysis.filter((item) => item.toBuy > 0) ?? [],
+    [monthlyPlan],
+  );
+  const monthlyComparisonDifferences = useMemo(
+    () =>
+      monthlyPlan?.analysis.filter(
+        (item) =>
+          item.comparison &&
+          Math.abs(item.comparison.shortageDifference) > 0.01,
+      ) ?? [],
     [monthlyPlan],
   );
   const monthlySummaries = useMemo(() => {
@@ -955,6 +973,8 @@ export default function Home() {
       const payload = await responseJson<{ plan?: StoredMonthlyPurchasePlan | null; error?: string }>(response);
       if (!response.ok) throw new Error(payload.error || "No se pudo leer el análisis mensual.");
       setMonthlyPlan(payload.plan ?? null);
+      if (payload.plan?.roundingMultiple)
+        setMonthlyRounding(payload.plan.roundingMultiple);
     } catch (error) {
       setMonthlyState((current) => ({
         ...current,
@@ -962,35 +982,126 @@ export default function Home() {
       }));
     }
   }, []);
-  const selectMonthlyFile = async (file?: File) => {
-    if (!file) return;
-    setMonthlyState({ loading: true, message: "Leyendo las cuatro hojas…", error: "" });
+  const buildMonthlyDraft = (
+    sheets = monthlySources.sheets,
+    files = monthlySources.files,
+    roundingMultiple = monthlyRounding,
+  ) => {
+    const required: MonthlyPurchaseSourceKind[] = [
+      "estimate",
+      "stock",
+      "pending",
+    ];
+    const missing = required.filter((kind) => !sheets[kind]);
+    if (missing.length) {
+      const labels: Record<MonthlyPurchaseSourceKind, string> = {
+        estimate: "ESTIMADO",
+        stock: "STOCK",
+        pending: "PENDIENTE",
+        analysis: "ANALISIS",
+      };
+      throw new Error(
+        `Falta cargar ${missing.map((kind) => labels[kind]).join(", ")}.`,
+      );
+    }
+    return parseAutomaticMonthlyPurchaseSources(sheets, {
+      fileName:
+        [...new Set(Object.values(files).filter(Boolean))].join(" + ") ||
+        "Plan mensual automático",
+      sourceFiles: files,
+      roundingMultiple,
+    });
+  };
+  const selectMonthlyFiles = async (fileList?: FileList | null) => {
+    const files = Array.from(fileList ?? []);
+    if (!files.length) return;
+    setMonthlyState({
+      loading: true,
+      message: "Leyendo y clasificando los archivos…",
+      error: "",
+    });
     try {
       const XLSX = await import("xlsx");
-      const workbook = XLSX.read(await file.arrayBuffer(), {
-        type: "array",
-        cellDates: true,
-        cellFormula: true,
-      });
-      const sheets = Object.fromEntries(
-        workbook.SheetNames.map((name) => [
-          name,
-          XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], {
-            header: 1,
-            defval: "",
-            raw: true,
-          }),
-        ]),
+      const nextSheets = { ...monthlySources.sheets };
+      const nextFiles = { ...monthlySources.files };
+      let recognized = 0;
+      const batchKinds = new Set<MonthlyPurchaseSourceKind>();
+      for (const file of files) {
+        const workbook = XLSX.read(await file.arrayBuffer(), {
+          type: "array",
+          cellDates: true,
+          cellFormula: true,
+        });
+        const workbookSheets = Object.fromEntries(
+          workbook.SheetNames.map((name) => [
+            name,
+            XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], {
+              header: 1,
+              defval: "",
+              raw: true,
+            }),
+          ]),
+        );
+        const detected = detectMonthlyPurchaseSources(workbookSheets);
+        for (const kind of [
+          "estimate",
+          "stock",
+          "pending",
+          "analysis",
+        ] as MonthlyPurchaseSourceKind[]) {
+          if (!detected[kind]) continue;
+          nextSheets[kind] = detected[kind];
+          nextFiles[kind] = file.name;
+          batchKinds.add(kind);
+          recognized += 1;
+        }
+      }
+      if (!recognized)
+        throw new Error(
+          "No se reconoció ESTIMADO, STOCK, PENDIENTE ni ANALISIS en los archivos.",
+        );
+      if (
+        batchKinds.has("estimate") &&
+        batchKinds.has("stock") &&
+        batchKinds.has("pending") &&
+        !batchKinds.has("analysis")
+      ) {
+        delete nextSheets.analysis;
+        delete nextFiles.analysis;
+      }
+      setMonthlySources({ sheets: nextSheets, files: nextFiles });
+      const missing = (
+        ["estimate", "stock", "pending"] as MonthlyPurchaseSourceKind[]
+      ).filter((kind) => !nextSheets[kind]);
+      if (missing.length) {
+        setMonthlyDraft(null);
+        const label: Record<MonthlyPurchaseSourceKind, string> = {
+          estimate: "ESTIMADO",
+          stock: "STOCK",
+          pending: "PENDIENTE",
+          analysis: "ANALISIS",
+        };
+        setMonthlyState({
+          loading: false,
+          message: `Fuentes guardadas. Falta cargar ${missing
+            .map((kind) => label[kind])
+            .join(", ")}.`,
+          error: "",
+        });
+        return;
+      }
+      const parsed = buildMonthlyDraft(
+        nextSheets,
+        nextFiles,
+        monthlyRounding,
       );
-      const parsed = parseMonthlyPurchaseSheets(sheets, file.name);
       setMonthlyDraft(parsed);
       setMonthlyState({
         loading: false,
-        message: `${parsed.estimates.length} productos y ${parsed.analysis.length} insumos listos para guardar.`,
+        message: `${parsed.estimates.length} productos y ${parsed.analysis.length} insumos calculados automáticamente.`,
         error: "",
       });
     } catch (error) {
-      setMonthlyDraft(null);
       setMonthlyState({
         loading: false,
         message: "",
@@ -999,6 +1110,41 @@ export default function Home() {
     } finally {
       if (monthlyFileRef.current) monthlyFileRef.current.value = "";
     }
+  };
+  const recalculateMonthlyDraft = () => {
+    setMonthlyState({
+      loading: true,
+      message: "Calculando necesidad, stock y pendientes…",
+      error: "",
+    });
+    try {
+      const parsed = buildMonthlyDraft();
+      setMonthlyDraft(parsed);
+      setMonthlyState({
+        loading: false,
+        message: `Cálculo terminado: ${parsed.analysis.length} insumos y ${parsed.analysis.filter((item) => item.toBuy > 0).length} compras necesarias.`,
+        error: "",
+      });
+    } catch (error) {
+      setMonthlyDraft(null);
+      setMonthlyState({
+        loading: false,
+        message: "",
+        error:
+          error instanceof Error
+            ? error.message
+            : "No se pudo calcular el análisis.",
+      });
+    }
+  };
+  const clearMonthlySources = () => {
+    setMonthlySources({ sheets: {}, files: {} });
+    setMonthlyDraft(null);
+    setMonthlyState({
+      loading: false,
+      message: "Fuentes temporales limpiadas. El análisis compartido no fue eliminado.",
+      error: "",
+    });
   };
   const saveMonthlyPlan = async () => {
     if (!monthlyDraft) return;
@@ -1038,14 +1184,20 @@ export default function Home() {
       Pendiente: item.pending,
       Necesidad: item.necessity,
       "Saldo (Stock + Pendiente - Necesidad)": item.balance,
-      "Cantidad a comprar": item.toBuy,
+      "Faltante exacto": item.exactShortage,
+      [`Compra redondeada a ${formatNumber(monthlyPlan.roundingMultiple)}`]:
+        item.toBuy,
       Estado: item.toBuy > 0 ? "COMPRAR" : "CUBIERTO",
+      "Compra del análisis anterior": item.comparison?.toBuy ?? "",
+      "Diferencia contra análisis anterior":
+        item.comparison?.shortageDifference ?? "",
       Observación: item.note,
     }));
     const analysisSheet = XLSX.utils.json_to_sheet(analysisRows);
     analysisSheet["!cols"] = [
       { wch: 18 }, { wch: 42 }, { wch: 16 }, { wch: 16 }, { wch: 16 },
-      { wch: 34 }, { wch: 20 }, { wch: 14 }, { wch: 30 },
+      { wch: 34 }, { wch: 18 }, { wch: 26 }, { wch: 14 }, { wch: 26 },
+      { wch: 32 }, { wch: 30 },
     ];
     if (analysisSheet["!ref"]) analysisSheet["!autofilter"] = { ref: analysisSheet["!ref"] };
     XLSX.utils.book_append_sheet(workbook, analysisSheet, "Análisis");
@@ -1071,6 +1223,27 @@ export default function Home() {
     ];
     if (estimateSheet["!ref"]) estimateSheet["!autofilter"] = { ref: estimateSheet["!ref"] };
     XLSX.utils.book_append_sheet(workbook, estimateSheet, "Estimado");
+
+    const controlRows = [
+      ["Período", monthlyPlan.periodLabel],
+      ["Redondeo de compra", monthlyPlan.roundingMultiple],
+      ["Archivo ESTIMADO", monthlyPlan.sourceFiles.estimate ?? ""],
+      ["Archivo STOCK", monthlyPlan.sourceFiles.stock ?? ""],
+      ["Archivo PENDIENTE", monthlyPlan.sourceFiles.pending ?? ""],
+      ["Archivo ANALISIS (opcional)", monthlyPlan.sourceFiles.analysis ?? ""],
+      ["Filas ESTIMADO", monthlyPlan.sourceCounts.estimateRows],
+      ["Filas STOCK", monthlyPlan.sourceCounts.stockRows],
+      ["Filas PENDIENTE", monthlyPlan.sourceCounts.pendingRows],
+      ["Pendientes negativos tomados como 0", monthlyPlan.sourceCounts.negativePendingRows],
+      ["Pendientes duplicados ignorados", monthlyPlan.sourceCounts.duplicatePendingRows],
+      ["Pendientes vencidos incluidos", monthlyPlan.sourceCounts.overduePendingRows],
+      [],
+      ["Advertencias"],
+      ...monthlyPlan.warnings.map((warning) => [warning]),
+    ];
+    const controlSheet = XLSX.utils.aoa_to_sheet(controlRows);
+    controlSheet["!cols"] = [{ wch: 42 }, { wch: 90 }];
+    XLSX.utils.book_append_sheet(workbook, controlSheet, "Control");
     XLSX.writeFile(
       workbook,
       `analisis-compras-${monthlyPlan.periodLabel
@@ -2663,12 +2836,13 @@ export default function Home() {
                     <h2>
                       {monthlyPlan
                         ? `${monthlyPlan.periodLabel} · ${monthlyPlan.fileName}`
-                        : "Cargar estimado, stock, pendiente y análisis"}
+                        : "Cargar estimado, stock y pendiente"}
                     </h2>
                     <p>
-                      La aplicación lee las hojas ESTIMADO, STOCK, PENDIENTE y
-                      ANALISIS. El saldo se recalcula siempre como Stock +
-                      Pendiente − Necesidad.
+                      Podés elegir un libro consolidado o varios archivos. La
+                      necesidad sale del ESTIMADO, el ingreso pendiente se toma
+                      exclusivamente de C.por D./E. y la hoja ANALISIS es
+                      opcional: solo se usa para controlar diferencias.
                     </p>
                     {monthlyPlan && (
                       <small>
@@ -2685,9 +2859,10 @@ export default function Home() {
                       ref={monthlyFileRef}
                       type="file"
                       accept=".xlsx,.xls"
+                      multiple
                       hidden
                       onChange={(event) =>
-                        void selectMonthlyFile(event.target.files?.[0])
+                        void selectMonthlyFiles(event.target.files)
                       }
                     />
                     <button
@@ -2695,7 +2870,14 @@ export default function Home() {
                       disabled={monthlyState.loading}
                       onClick={() => monthlyFileRef.current?.click()}
                     >
-                      {monthlyPlan ? "Reemplazar archivo" : "Seleccionar Excel"}
+                      Cargar archivo(s)
+                    </button>
+                    <button
+                      className="secondary-button"
+                      disabled={monthlyState.loading}
+                      onClick={clearMonthlySources}
+                    >
+                      Limpiar fuentes
                     </button>
                     {monthlyPlan && (
                       <button
@@ -2708,6 +2890,75 @@ export default function Home() {
                   </div>
                 </article>
 
+                <div className="monthly-source-grid">
+                  {([
+                    ["estimate", "ESTIMADO", "Obligatorio"],
+                    ["stock", "STOCK", "Obligatorio"],
+                    ["pending", "PENDIENTE", "Obligatorio"],
+                    ["analysis", "ANALISIS", "Opcional · comparación"],
+                  ] as Array<
+                    [MonthlyPurchaseSourceKind, string, string]
+                  >).map(([kind, label, detail]) => {
+                    const temporaryFile = monthlySources.files[kind];
+                    const savedFile = monthlyPlan?.sourceFiles?.[kind];
+                    const fileName = temporaryFile || savedFile;
+                    return (
+                      <article
+                        key={kind}
+                        data-ready={Boolean(temporaryFile)}
+                        data-saved={!temporaryFile && Boolean(savedFile)}
+                      >
+                        <span>{label}</span>
+                        <strong>
+                          {temporaryFile
+                            ? "Listo para calcular"
+                            : savedFile
+                              ? "Usado en el cálculo guardado"
+                              : "Sin cargar"}
+                        </strong>
+                        <small>{fileName || detail}</small>
+                      </article>
+                    );
+                  })}
+                </div>
+
+                <article className="monthly-calculation-controls">
+                  <label>
+                    <span>Redondear compra a múltiplos de</span>
+                    <select
+                      value={monthlyRounding}
+                      onChange={(event) =>
+                        setMonthlyRounding(Number(event.target.value))
+                      }
+                    >
+                      <option value={1}>Sin redondeo</option>
+                      <option value={100}>100</option>
+                      <option value={1000}>1.000</option>
+                      <option value={10000}>10.000</option>
+                    </select>
+                  </label>
+                  <div>
+                    <small>
+                      El faltante exacto se conserva; solo la compra final se
+                      redondea hacia arriba.
+                    </small>
+                    <button
+                      className="primary-button"
+                      disabled={
+                        monthlyState.loading ||
+                        !monthlySources.sheets.estimate ||
+                        !monthlySources.sheets.stock ||
+                        !monthlySources.sheets.pending
+                      }
+                      onClick={recalculateMonthlyDraft}
+                    >
+                      {monthlyState.loading
+                        ? "Calculando…"
+                        : "Calcular nuevamente"}
+                    </button>
+                  </div>
+                </article>
+
                 {monthlyDraft && (
                   <article className="monthly-preview">
                     <div>
@@ -2716,7 +2967,9 @@ export default function Home() {
                         {monthlyDraft.estimates.length} productos ·{" "}
                         {monthlyDraft.analysis.length} insumos analizados ·{" "}
                         {monthlyDraft.sourceCounts.stockRows} filas de stock ·{" "}
-                        {monthlyDraft.sourceCounts.pendingRows} filas pendientes
+                        {monthlyDraft.sourceCounts.pendingRows} filas pendientes ·
+                        compra redondeada a{" "}
+                        {formatNumber(monthlyDraft.roundingMultiple)}
                       </span>
                     </div>
                     <button
@@ -2736,13 +2989,27 @@ export default function Home() {
                     {monthlyState.error}
                   </p>
                 )}
+                {(monthlyDraft?.warnings ?? monthlyPlan?.warnings ?? []).length >
+                  0 && (
+                  <article className="monthly-warning-list">
+                    <strong>Controles que requieren atención</strong>
+                    <ul>
+                      {(monthlyDraft?.warnings ?? monthlyPlan?.warnings ?? []).map(
+                        (warning, index) => (
+                          <li key={`${warning}-${index}`}>{warning}</li>
+                        ),
+                      )}
+                    </ul>
+                  </article>
+                )}
 
                 {!monthlyPlan ? (
                   <article className="empty-consumption">
                     <h2>Todavía no hay un análisis mensual compartido</h2>
                     <p>
-                      Seleccioná el Excel consolidado. Antes de guardarlo se
-                      mostrará cuántos productos e insumos fueron reconocidos.
+                      Cargá ESTIMADO, STOCK y PENDIENTE juntos o por separado.
+                      Antes de guardarlo se mostrará cuántos productos e insumos
+                      fueron reconocidos.
                     </p>
                   </article>
                 ) : (
@@ -2776,9 +3043,26 @@ export default function Home() {
                             ),
                           )}
                         </strong>
-                        <span>unidades a comprar</span>
+                        <span>
+                          unidades a comprar, redondeadas a{" "}
+                          {formatNumber(monthlyPlan.roundingMultiple)}
+                        </span>
                       </article>
                     </div>
+
+                    {monthlyPlan.sourceCounts.analysisRows > 0 && (
+                      <p
+                        className={`monthly-comparison-summary ${
+                          monthlyComparisonDifferences.length
+                            ? "has-differences"
+                            : ""
+                        }`}
+                      >
+                        {monthlyComparisonDifferences.length
+                          ? `${monthlyComparisonDifferences.length} insumos difieren del ANALISIS anterior. La tabla muestra el desvío para revisarlos.`
+                          : "El cálculo automático coincide con el ANALISIS anterior en los insumos comparados."}
+                      </p>
+                    )}
 
                     <div className="monthly-months">
                       {monthlySummaries.map((month) => (
@@ -2795,8 +3079,8 @@ export default function Home() {
                         <div>
                           <h2>Análisis automático de compra</h2>
                           <p>
-                            Un saldo negativo se transforma en cantidad positiva
-                            a comprar.
+                            El faltante exacto se transforma en una compra
+                            positiva redondeada hacia arriba.
                           </p>
                         </div>
                         <label className="search-box">
@@ -2816,6 +3100,12 @@ export default function Home() {
                         <span>Necesidad</span>
                         <b>=</b>
                         <strong>Saldo</strong>
+                        <b>→</b>
+                        <span>Faltante exacto</span>
+                        <b>→</b>
+                        <strong>
+                          Compra × {formatNumber(monthlyPlan.roundingMultiple)}
+                        </strong>
                       </div>
                       <div className="table-scroll">
                         <table>
@@ -2827,7 +3117,11 @@ export default function Home() {
                               <th>Pendiente</th>
                               <th>Necesidad</th>
                               <th>Saldo</th>
-                              <th>Comprar</th>
+                              <th>Faltante exacto</th>
+                              <th>Compra redondeada</th>
+                              {monthlyPlan.sourceCounts.analysisRows > 0 && (
+                                <th>Control vs. ANALISIS</th>
+                              )}
                             </tr>
                           </thead>
                           <tbody>
@@ -2849,9 +3143,27 @@ export default function Home() {
                                 <td className={item.balance < 0 ? "negative-balance" : "positive-balance"}>
                                   {formatNumber(item.balance)}
                                 </td>
+                                <td className={item.exactShortage > 0 ? "negative-balance" : "positive-balance"}>
+                                  {item.exactShortage > 0
+                                    ? formatNumber(item.exactShortage)
+                                    : "—"}
+                                </td>
                                 <td className="number-cell purchase-quantity">
                                   {item.toBuy > 0 ? formatNumber(item.toBuy) : "—"}
                                 </td>
+                                {monthlyPlan.sourceCounts.analysisRows > 0 && (
+                                  <td>
+                                    {!item.comparison
+                                      ? "Sin código comparable"
+                                      : Math.abs(
+                                            item.comparison.shortageDifference,
+                                          ) <= 0.01
+                                        ? "Coincide"
+                                        : `Δ ${formatNumber(
+                                            item.comparison.shortageDifference,
+                                          )}`}
+                                  </td>
+                                )}
                               </tr>
                             ))}
                           </tbody>

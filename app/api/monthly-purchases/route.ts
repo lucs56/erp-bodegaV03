@@ -24,11 +24,14 @@ export async function GET(request: Request) {
         payload: string;
         imported_by: string;
         imported_at: string;
-      }>();
+    }>();
     if (!row) return Response.json({ plan: null });
+    const payload = normalizeMonthlyPurchasePlan(
+      JSON.parse(row.payload) as MonthlyPurchasePlanPayload,
+    );
     return Response.json({
       plan: {
-        ...JSON.parse(row.payload),
+        ...payload,
         fileName: row.file_name,
         periodLabel: row.period_label,
         importedBy: row.imported_by,

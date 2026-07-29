@@ -10,18 +10,23 @@
 - El módulo visible `BOM` pasa a llamarse `Ficha técnica`; las rutas y tablas internas se conservan para no perder información.
 - Asistente general del ERP para explicar fecha, sincronización, cambios, estado y módulos. Funciona localmente y admite IA opcional mediante la API de OpenAI.
 - Compras incorpora dos vistas independientes: el cálculo semanal existente y un nuevo `Análisis mensual`.
-- El análisis mensual importa el Excel consolidado con las hojas `ESTIMADO`, `ANALISIS`, `STOCK` y `PENDIENTE`, reconoce meses, productos, presentaciones y códigos de insumos sin posiciones fijas.
-- El saldo se recalcula siempre como `Stock + Pendiente - Necesidad`. Un saldo negativo se muestra como una cantidad positiva a comprar; el valor enviado por el navegador nunca se acepta sin recalcularlo en el servidor.
+- El análisis mensual acepta un Excel consolidado o archivos separados. `ESTIMADO`, `STOCK` y `PENDIENTE` son obligatorios; `ANALISIS` es opcional y se usa únicamente para comparar el cálculo nuevo con el anterior.
+- La necesidad se calcula automáticamente desde las cajas, presentación y códigos de botella, cierre, cápsula y caja del `ESTIMADO`. Ya no depende de la columna Necesidad de `ANALISIS`.
+- El stock se toma de la columna `TOTAL`. El pendiente se toma exclusivamente de `C.por D./E.`; los valores negativos se consideran ajustes y aportan cero, los vencidos positivos permanecen incluidos y las filas duplicadas exactas se ignoran.
+- El saldo se recalcula siempre como `Stock + Pendiente - Necesidad`. El faltante exacto se conserva y la compra final se redondea hacia arriba a múltiplos de 10.000, valor que puede cambiarse antes de calcular.
 - El último análisis mensual se guarda en Cloudflare D1 y queda disponible para todos los usuarios y dispositivos. También puede exportarse nuevamente a Excel.
+- Esta entrega apunta a la base D1 `erpcompras`, ID `48598a0a-0415-46fd-8918-cfa1d0928a6b`, conservando el binding `DB`.
 
 ### Uso del análisis mensual de compras
 
 1. Ingresá a `Compras` y elegí la pestaña `Análisis mensual`.
-2. Presioná `Seleccionar Excel` y elegí el archivo consolidado.
-3. Verificá la vista previa: período, productos, insumos, filas de stock y filas pendientes reconocidas.
-4. Presioná `Guardar para todos`.
-5. Revisá los saldos negativos resaltados. La columna `Comprar` muestra el valor absoluto que debe planificarse.
-6. Usá `Exportar análisis` para descargar un libro con el análisis calculado y el estimado mensual.
+2. Presioná `Cargar archivo(s)`. Podés elegir a la vez un libro consolidado o varios archivos separados.
+3. Comprobá que las tarjetas `ESTIMADO`, `STOCK` y `PENDIENTE` indiquen `Listo para calcular`. `ANALISIS` puede quedar sin cargar.
+4. Elegí el múltiplo de redondeo y presioná `Calcular nuevamente` si necesitás repetir el cálculo.
+5. Verificá la vista previa: período, productos, insumos, filas reconocidas, ajustes negativos, duplicados y pendientes vencidos.
+6. Presioná `Guardar para todos`.
+7. Revisá `Saldo`, `Faltante exacto` y `Compra redondeada`. Si cargaste `ANALISIS`, la última columna muestra el desvío contra el cálculo anterior.
+8. Usá `Exportar análisis` para descargar un libro con `Análisis`, `Estimado` y `Control`.
 
 La tabla D1 `monthly_purchase_plans` se crea automáticamente en el primer uso. No es necesario borrar ni reemplazar la base existente.
 
