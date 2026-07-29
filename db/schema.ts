@@ -18,11 +18,3 @@ export const stockDepotItems = sqliteTable("stock_depot_items", {
 export const appUsers = sqliteTable("app_users", {
   id: integer("id").primaryKey({ autoIncrement: true }), email: text("email").notNull(), username:text("username"),passwordHash:text("password_hash"),name: text("name").notNull(), role: text("role").notNull().default("planner"), active: integer("active",{mode:"boolean"}).notNull().default(true), permissions: text("permissions").notNull().default("programacion,productos,bom,consumos,stock,faltantes,compras"), updatedAt:text("updated_at").notNull(),
 },table=>[uniqueIndex("app_users_email_uq").on(table.email),uniqueIndex("app_users_username_uq").on(table.username)]);
-export const monthlyPurchasePlans = sqliteTable("monthly_purchase_plans", {
-  key: text("key").primaryKey(),
-  fileName: text("file_name").notNull(),
-  periodLabel: text("period_label").notNull(),
-  payload: text("payload").notNull(),
-  importedBy: text("imported_by").notNull(),
-  importedAt: text("imported_at").notNull(),
-});

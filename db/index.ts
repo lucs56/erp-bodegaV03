@@ -74,14 +74,6 @@ async function ensureSchema(database: D1Database) {
         value TEXT NOT NULL,
         fetched_at TEXT NOT NULL
       )`,
-      `CREATE TABLE IF NOT EXISTS monthly_purchase_plans (
-        key TEXT PRIMARY KEY NOT NULL,
-        file_name TEXT NOT NULL,
-        period_label TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        imported_by TEXT NOT NULL,
-        imported_at TEXT NOT NULL
-      )`,
     ];
 
     await database.batch(setupStatements.map((sql) => database.prepare(sql)));

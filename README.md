@@ -1,34 +1,60 @@
 # ERP de Insumos para Bodega
 
+## Análisis mensual de compras
+
+Esta entrega conecta las tres fuentes que utiliza Compras:
+
+- `ESTIMADO`: productos previstos y necesidad de cada insumo.
+- `STOCK`: existencia actual y distribución por depósito.
+- `PENDIENTE`: órdenes emitidas que todavía deben recibirse.
+- `ANALISIS` (opcional): ajustes de necesidad y pendiente ya confirmados por
+  Compras.
+
+El módulo **Análisis compras** acepta un único Excel con esas hojas o varios
+archivos seleccionados juntos. Calcula por insumo:
+
+```text
+saldo = stock + pendiente confirmado - necesidad confirmada
+compra exacta = máximo(0, -saldo)
+compra redondeada = compra exacta redondeada hacia arriba
+```
+
+El redondeo inicial es de 10.000 unidades y puede modificarse antes de guardar.
+Al usar **Guardar y sincronizar**, el análisis se comparte en Cloudflare D1 y
+el contenido de la hoja `STOCK` reemplaza la fotografía de existencias. De ese
+modo Stock, Faltantes semanales y Análisis de compras utilizan la misma
+información.
+
+Los códigos `30354` y `30354A` se consideran el mismo insumo:
+
+- el stock de ambos códigos se suma;
+- la necesidad se calcula una sola vez;
+- el resultado conserva ambos códigos como trazabilidad;
+- el código consolidado utilizado por la aplicación es `30354A`.
+
+La navegación conserva Programación, Productos, Ficha técnica, Consumos, Stock
+y Faltantes porque son las fuentes y controles que explican el resultado. El
+informe antiguo de compras semanales fue reemplazado: **Faltantes** controla las
+semanas vigentes y **Análisis compras** realiza la planificación mensual.
+
+### Base de datos configurada
+
+- Nombre: `erpcompras`
+- ID: `48598a0a-0415-46fd-8918-cfa1d0928a6b`
+- Binding: `DB`
+
+Las tablas se crean automáticamente durante el primer uso. El cálculo mensual
+se guarda en `app_settings` y queda disponible para todos los usuarios y
+dispositivos conectados a esta misma base.
+
 ## Mejoras de esta entrega
 
 - Sincronización inmediata al iniciar sesión, actualización automática cada 30 segundos y botón manual.
 - Una sola lectura de Google Sheets compartida entre Programación y el motor de cálculo, con reintento controlado para evitar respuestas 503 y Error 1102.
 - El último programa y el último cálculo correcto permanecen visibles si Google o Cloudflare demoran.
-- El inicio de sesión y la sincronización tienen límites de espera: la pantalla no puede quedar indefinidamente en `Validando acceso…` o `Actualizando…`.
 - Las filas tachadas en Google Sheets se muestran como `REALIZADO` y quedan excluidas de Consumos, Faltantes y Compras.
 - El módulo visible `BOM` pasa a llamarse `Ficha técnica`; las rutas y tablas internas se conservan para no perder información.
 - Asistente general del ERP para explicar fecha, sincronización, cambios, estado y módulos. Funciona localmente y admite IA opcional mediante la API de OpenAI.
-- Compras incorpora dos vistas independientes: el cálculo semanal existente y un nuevo `Análisis mensual`.
-- El análisis mensual acepta un Excel consolidado o archivos separados. `ESTIMADO`, `STOCK` y `PENDIENTE` son obligatorios; `ANALISIS` es opcional y se usa únicamente para comparar el cálculo nuevo con el anterior.
-- La necesidad se calcula automáticamente desde las cajas, presentación y códigos de botella, cierre, cápsula y caja del `ESTIMADO`. Ya no depende de la columna Necesidad de `ANALISIS`.
-- El stock se toma de la columna `TOTAL`. El pendiente se toma exclusivamente de `C.por D./E.`; los valores negativos se consideran ajustes y aportan cero, los vencidos positivos permanecen incluidos y las filas duplicadas exactas se ignoran.
-- El saldo se recalcula siempre como `Stock + Pendiente - Necesidad`. El faltante exacto se conserva y la compra final se redondea hacia arriba a múltiplos de 10.000, valor que puede cambiarse antes de calcular.
-- El último análisis mensual se guarda en Cloudflare D1 y queda disponible para todos los usuarios y dispositivos. También puede exportarse nuevamente a Excel.
-- Esta entrega apunta a la base D1 `erpcompras`, ID `48598a0a-0415-46fd-8918-cfa1d0928a6b`, conservando el binding `DB`.
-
-### Uso del análisis mensual de compras
-
-1. Ingresá a `Compras` y elegí la pestaña `Análisis mensual`.
-2. Presioná `Cargar archivo(s)`. Podés elegir a la vez un libro consolidado o varios archivos separados.
-3. Comprobá que las tarjetas `ESTIMADO`, `STOCK` y `PENDIENTE` indiquen `Listo para calcular`. `ANALISIS` puede quedar sin cargar.
-4. Elegí el múltiplo de redondeo y presioná `Calcular nuevamente` si necesitás repetir el cálculo.
-5. Verificá la vista previa: período, productos, insumos, filas reconocidas, ajustes negativos, duplicados y pendientes vencidos.
-6. Presioná `Guardar para todos`.
-7. Revisá `Saldo`, `Faltante exacto` y `Compra redondeada`. Si cargaste `ANALISIS`, la última columna muestra el desvío contra el cálculo anterior.
-8. Usá `Exportar análisis` para descargar un libro con `Análisis`, `Estimado` y `Control`.
-
-La tabla D1 `monthly_purchase_plans` se crea automáticamente en el primer uso. No es necesario borrar ni reemplazar la base existente.
 
 ### IA opcional para el asistente
 

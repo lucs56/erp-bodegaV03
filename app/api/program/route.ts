@@ -4,22 +4,8 @@ import { readLastStoredProgram,readLiveProgram,type LiveProgram } from "../../..
 export const dynamic = "force-dynamic";
 
 export async function GET(request:Request) {
-  const params = new URL(request.url).searchParams;
-  if (params.get("stored") === "1") {
-    const stored = await readLastStoredProgram();
-    return stored
-      ? liveResponse(stored, true, "Última lectura compartida guardada en Cloudflare D1.")
-      : snapshotResponse("Todavía no existe una lectura compartida guardada.");
-  }
-  if (params.get("background") === "1") {
-    const stored = await readLastStoredProgram();
-    await scheduleBackground(readLiveProgram(true).catch(() => null).then(() => undefined));
-    return stored
-      ? liveResponse(stored, true, "Sincronización iniciada en segundo plano.")
-      : snapshotResponse("Sincronización inicial en curso. Los datos aparecerán automáticamente.");
-  }
   try {
-    const live = await readLiveProgram(params.get("fresh")==="1");
+    const live = await readLiveProgram(new URL(request.url).searchParams.get("fresh")==="1");
     if (live) {
       const records = live.weeks.flatMap((week) => week.records);
       return NextResponse.json(
@@ -50,15 +36,4 @@ function snapshotResponse(notice: string) {
     },
     { headers: { "cache-control": "no-store" } },
   );
-}
-
-async function scheduleBackground(task: Promise<void>) {
-  try {
-    const workers = await import("cloudflare:workers");
-    workers.waitUntil(task);
-  } catch {
-    // La validación local no expone el módulo de Cloudflare. En ese entorno
-    // dejamos que la tarea continúe sin bloquear la respuesta.
-    void task;
-  }
 }
