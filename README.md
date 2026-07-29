@@ -1,42 +1,40 @@
 # ERP de Insumos para Bodega
 
-> Rama experimental destinada al repositorio `lucs56/erp-bodegaV03`. Utiliza la base D1 independiente `erpcompras` (`48598a0a-0415-46fd-8918-cfa1d0928a6b`) y no modifica los datos del ERP V02.
+## Mejoras de esta entrega
 
-## Planificación mensual y navegación lateral
+- Sincronización inmediata al iniciar sesión, actualización automática cada 30 segundos y botón manual.
+- Una sola lectura de Google Sheets compartida entre Programación y el motor de cálculo, con reintento controlado para evitar respuestas 503 y Error 1102.
+- El último programa y el último cálculo correcto permanecen visibles si Google o Cloudflare demoran.
+- El inicio de sesión y la sincronización tienen límites de espera: la pantalla no puede quedar indefinidamente en `Validando acceso…` o `Actualizando…`.
+- Las filas tachadas en Google Sheets se muestran como `REALIZADO` y quedan excluidas de Consumos, Faltantes y Compras.
+- El módulo visible `BOM` pasa a llamarse `Ficha técnica`; las rutas y tablas internas se conservan para no perder información.
+- Asistente general del ERP para explicar fecha, sincronización, cambios, estado y módulos. Funciona localmente y admite IA opcional mediante la API de OpenAI.
+- Compras incorpora dos vistas independientes: el cálculo semanal existente y un nuevo `Análisis mensual`.
+- El análisis mensual importa el Excel consolidado con las hojas `ESTIMADO`, `ANALISIS`, `STOCK` y `PENDIENTE`, reconoce meses, productos, presentaciones y códigos de insumos sin posiciones fijas.
+- El saldo se recalcula siempre como `Stock + Pendiente - Necesidad`. Un saldo negativo se muestra como una cantidad positiva a comprar; el valor enviado por el navegador nunca se acepta sin recalcularlo en el servidor.
+- El último análisis mensual se guarda en Cloudflare D1 y queda disponible para todos los usuarios y dispositivos. También puede exportarse nuevamente a Excel.
 
-- Nueva sección `Plan mensual`, separada de la programación semanal existente.
-- Muestra dos cargas independientes y siempre visibles: `Archivo de estimado mensual` y `Archivo de pendientes de recepción`.
-- Importa estimados en formato largo (`Mes`, `Código producto`, `Botellas`, `Cj x`) o ancho, con columnas `Agosto`, `Septiembre`, etc.
-- Importa un segundo Excel de pendientes con código de insumo, cantidad por recibir, mes o fecha de entrega, proveedor y OC/pedido.
-- Reemplazar uno de los archivos conserva el otro en pantalla. El botón `Guardar ambos y calcular` confirma las dos listas juntas y evita que quede un cálculo a medias.
-- Valida cada archivo por separado, informa las filas rechazadas y conserva los datos anteriores cuando un archivo no contiene ninguna fila válida.
-- Relaciona automáticamente el código del vino con su BOM y obtiene los códigos de botellas, cierres, cápsulas, etiquetas, cajas y demás insumos.
-- Incluye en la proyección los insumos de las etapas `FRACCIONAR`, `VESTIR` y `ENCAJONAR` del producto terminado.
-- Calcula cajas enteras según presentación de 6 o 12 botellas.
-- Proyecta mes por mes: `necesidad bruta − stock − pendiente por llegar = compra a planificar`.
-- El saldo disponible se arrastra al mes siguiente y una entrega futura no cubre consumos anteriores.
-- Mantiene visible el stock desglosado por depósito y exporta programa, pendientes y plan de compras en un único Excel.
-- Programa y pendientes se guardan en las tablas D1 `monthly_plan_rows` e `incoming_materials`, creadas automáticamente sin alterar los datos existentes.
-- La API admite hasta 5.000 filas de estimado y 10.000 filas de pendientes por guardado, usando inserciones masivas para reducir tiempo de CPU en Cloudflare.
-- La navegación principal pasa a una barra lateral en escritorio y conserva el formato adaptable en pantallas pequeñas.
-- Incluye `public/examples/Plantilla-Estimado-Mensual.xlsx` y `public/examples/Plantilla-Pendientes-Recepcion.xlsx` para comenzar las pruebas.
+### Uso del análisis mensual de compras
 
-### Flujo de prueba
+1. Ingresá a `Compras` y elegí la pestaña `Análisis mensual`.
+2. Presioná `Seleccionar Excel` y elegí el archivo consolidado.
+3. Verificá la vista previa: período, productos, insumos, filas de stock y filas pendientes reconocidas.
+4. Presioná `Guardar para todos`.
+5. Revisá los saldos negativos resaltados. La columna `Comprar` muestra el valor absoluto que debe planificarse.
+6. Usá `Exportar análisis` para descargar un libro con el análisis calculado y el estimado mensual.
 
-1. Ingresar a `Plan mensual`.
-2. En la primera tarjeta, subir el Excel del estimado de productos.
-3. En la segunda tarjeta, subir el Excel de pendientes de recepción.
-4. Revisar la cantidad de filas válidas indicada en cada tarjeta.
-5. Presionar `Guardar ambos y calcular`.
-6. Abrir `Resultado` para revisar necesidad, stock, pendientes aplicados y compra sugerida.
-7. Usar `Exportar Excel` para descargar las tres hojas consolidadas.
+La tabla D1 `monthly_purchase_plans` se crea automáticamente en el primer uso. No es necesario borrar ni reemplazar la base existente.
 
-## Corrección de pantalla blanca v33
+### IA opcional para el asistente
 
-- El tablero ya no intenta leer la etiqueta de una semana inexistente mientras Google Sheets está cargando o devuelve temporalmente cero semanas.
-- Muestra un estado seguro `Sin programación cargada` y mantiene disponible la interfaz.
-- Los gráficos evitan dividir por cero cuando todavía no hay operaciones.
-- El `401` de `/api/auth` continúa siendo la respuesta normal cuando no existe una sesión iniciada.
+La aplicación funciona sin una clave de OpenAI. En ese caso utiliza respuestas
+locales verificables. Para habilitar respuestas más naturales, configurá estos
+secretos/variables en Cloudflare:
+
+- `OPENAI_API_KEY`: secreto de la API de OpenAI.
+- `OPENAI_MODEL`: opcional; el valor preparado es `gpt-5.6-sol`.
+
+Nunca coloques la clave real en `.env.example` ni la subas a Git.
 
 ## Mejoras de la versión 32
 
@@ -44,7 +42,7 @@
 - La configuración operativa es editable únicamente por administradores y se guarda en Cloudflare D1.
 - Permite configurar el ID del Sheet, los intervalos de sincronización y caché, y los depósitos incluidos.
 - La caché de programación es compartida en D1 para evitar reprocesamientos entre navegadores y reducir el riesgo del Error 1102.
-- Se recomiendan 60 segundos de sincronización y caché; el botón de actualización inmediata continúa disponible.
+- La configuración sigue siendo editable por el administrador. Esta entrega migra el valor anterior a 30 segundos de sincronización y 15 segundos de caché.
 - Las credenciales privadas de Google permanecen protegidas como secretos de Cloudflare.
 
 ## Mejoras de la versión 28

@@ -4,6 +4,8 @@ export type SheetGrid = {
   sheetId: number;
   title: string;
   values: unknown[][];
+  /** Números de fila (base 1) con texto tachado en la programación. */
+  struckRows?: Set<number>;
 };
 
 export type ParsedWeek = {
@@ -133,6 +135,7 @@ export function parseProgramSheet(grid: SheetGrid): ParsedWeek {
     const material = (key: ColumnKey) => normalizeMaterial(value(row, columns?.[key]));
     const record: ProgramRecord = {
       id: `${identity.weekId}:${stableHash(`${identityKey}|${occurrence}`)}`,
+      completed: grid.struckRows?.has(sourceRow) ?? false,
       weekId: identity.weekId,
       weekLabel: identity.weekLabel,
       weekStatus: identity.status,

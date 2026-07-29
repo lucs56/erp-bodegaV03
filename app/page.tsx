@@ -8,12 +8,18 @@ import {
 import { diffProgram } from "../lib/program-diff";
 import { parseStockRows, type StockImportItem } from "../lib/stock-import";
 import { suggestBomFromProgram } from "../lib/bom-suggestions";
-import MonthlyPlanning from "../components/monthly-planning";
+import {
+  generalAssistantFallback,
+  type GeneralAssistantContext,
+} from "../lib/assistant";
+import {
+  parseMonthlyPurchaseSheets,
+  type MonthlyPurchasePlanPayload,
+} from "../lib/monthly-purchases";
 
 type View =
   | "resumen"
   | "programacion"
-  | "mensual"
   | "productos"
   | "bom"
   | "consumos"
@@ -33,7 +39,7 @@ type BomItem = {
 };
 type BomProduct = { id: number; code: string; name: string; items: BomItem[] };
 type OperationalSettings={spreadsheetId:string;syncIntervalSeconds:number;cacheSeconds:number;includedDepots:string[]};
-const DEFAULT_OPERATIONAL_SETTINGS:OperationalSettings={spreadsheetId:"1XL44rx3sNKpxowAQzY1iSjy7s8lYOsPTMngD6xeBDPQ",syncIntervalSeconds:60,cacheSeconds:60,includedDepots:["2","13","C18","R18","2OB"]};
+const DEFAULT_OPERATIONAL_SETTINGS:OperationalSettings={spreadsheetId:"1XL44rx3sNKpxowAQzY1iSjy7s8lYOsPTMngD6xeBDPQ",syncIntervalSeconds:30,cacheSeconds:15,includedDepots:["2","13","C18","R18","2OB"]};
 type Requirement = {
   materialCode: string;
   materialName: string;
@@ -52,6 +58,10 @@ type ShortageRequirement = Requirement & {
   available: number;
   depots?:Record<string,number>;
   shortage: number;
+};
+type StoredMonthlyPurchasePlan = MonthlyPurchasePlanPayload & {
+  importedAt: string;
+  importedBy: string;
 };
 const emptyBomItem = (): BomItem => ({
   materialCode: "",
@@ -126,7 +136,23 @@ function depotLabel(depot:string){
 
 async function responseJson<T>(response:Response):Promise<T>{
   const text=await response.text();
-  try{return JSON.parse(text) as T;}catch{throw new Error(response.status===503?"El servicio está ocupado. Esperá unos segundos y volvé a intentar.":`El servidor devolvió una respuesta inválida (${response.status}).`);}
+  try{return JSON.parse(text) as T;}catch{throw new Error(response.status===503?"El servicio está ocupado. Se conservan los últimos datos válidos y se reintentará automáticamente.":`El servidor devolvió una respuesta inválida (${response.status}).`);}
+}
+
+async function fetchWithTimeout(input:RequestInfo|URL,init?:RequestInit,timeoutMs=10_000){
+  const controller=new AbortController();
+  const timeout=window.setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await fetch(input,{...init,signal:controller.signal});}
+  finally{window.clearTimeout(timeout);}
+}
+
+async function fetchWithRetry(input:RequestInfo|URL,init?:RequestInit,timeoutMs=10_000){
+  let response=await fetchWithTimeout(input,init,timeoutMs);
+  if([429,503,504].includes(response.status)){
+    await new Promise(resolve=>window.setTimeout(resolve,500));
+    response=await fetchWithTimeout(input,init,timeoutMs);
+  }
+  return response;
 }
 
 function firstShortageWeek(item: ShortageRequirement) {
@@ -251,7 +277,9 @@ export default function Home() {
       "La conexión productiva de solo lectura todavía no está configurada.",
   });
   const [refreshing, setRefreshing] = useState(false);
-  const refreshingRef=useRef(false);
+  const refreshPromiseRef=useRef<Promise<{changed:boolean;live:boolean}>|null>(null);
+  const programPollTimerRef=useRef<number|null>(null);
+  const requirementsPromiseRef=useRef<Promise<void>|null>(null);
   const [view, setView] = useState<View>("resumen");
   const [adminTab,setAdminTab]=useState<"usuarios"|"configuracion"|"diagnostico">("usuarios");
   const [selectedWeek, setSelectedWeek] = useState("");
@@ -281,6 +309,7 @@ export default function Home() {
     loading: false,
     mapped: 0,
     blocked: 0,
+    completed: 0,
     provisional: 0,
     stockItems: 0,
     error: "",
@@ -330,6 +359,16 @@ export default function Home() {
     includedRows: 0,
     excludedRows: 0,
   });
+  const monthlyFileRef = useRef<HTMLInputElement>(null);
+  const [purchaseMode, setPurchaseMode] = useState<"weekly" | "monthly">("weekly");
+  const [monthlyPlan, setMonthlyPlan] = useState<StoredMonthlyPurchasePlan | null>(null);
+  const [monthlyDraft, setMonthlyDraft] = useState<MonthlyPurchasePlanPayload | null>(null);
+  const [monthlyQuery, setMonthlyQuery] = useState("");
+  const [monthlyState, setMonthlyState] = useState({
+    loading: false,
+    message: "",
+    error: "",
+  });
   const [users, setUsers] = useState<
     Array<{
       id: number;
@@ -351,43 +390,42 @@ export default function Home() {
     role: "planner",
     active: true,
     permissions:
-      "resumen,programacion,mensual,productos,consumos,stock,faltantes,compras",
+      "resumen,programacion,productos,consumos,stock,faltantes,compras",
   });
   const [userMessage, setUserMessage] = useState("");
   const [userQuery, setUserQuery] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
+  const [chatLoading,setChatLoading]=useState(false);
   const [chatMessages, setChatMessages] = useState<
     Array<{ from: "user" | "bot"; text: string }>
   >([
     {
       from: "bot",
-      text: "¡Hola! Soy tu asistente de insumos. Puedo ayudarte a revisar stock, próximos faltantes, compras y la programación. Podés escribirme un código, el nombre de un insumo o preguntarme algo como “¿qué debería comprar primero?”.",
+      text: "¡Hola! Soy el asistente general del ERP. Puedo explicarte la sincronización, los cambios del programa, el estado del sistema y para qué sirve cada módulo.",
     },
   ]);
   const weeks = useMemo(() => summarizeWeeks(records), [records]);
-  // Durante el inicio de sesión la programación puede tardar unos segundos o
-  // Google Sheets puede devolver temporalmente cero semanas. El tablero debe
-  // seguir siendo navegable en ese estado en lugar de intentar leer `.label`
-  // sobre un valor inexistente y dejar toda la aplicación en blanco.
   const selected = weeks.find((week) => week.id === selectedWeek) ?? weeks[0] ?? {
-    id: "empty",
-    label: "Sin programación cargada",
-    status: "pendiente",
+    id: "",
+    label: "Esperando programación",
+    status: "Actualizando",
+    detail: "Se mostrará la primera semana disponible",
+    fractionBottles: 0,
     operations: 0,
-    bottles: 0,
     fraccionar: 0,
     vestir: 0,
     encajonar: 0,
+    issues: 0,
   };
   const missingCodeRecords = useMemo(
-    () => records.filter((record) => !record.productCode),
+    () => records.filter((record) => !record.completed && !record.productCode),
     [records],
   );
   const withoutEmbeddedMaterials = useMemo(
     () =>
       records.filter((record) =>
-        Object.values(record.materials).every((value) => !value),
+        !record.completed&&Object.values(record.materials).every((value) => !value),
       ),
     [records],
   );
@@ -567,6 +605,38 @@ export default function Home() {
       }))
       .sort((left, right) => left.category.localeCompare(right.category, "es"));
   }, [visibleShortages]);
+  const monthlyAnalysis = useMemo(() => {
+    if (!monthlyPlan) return [];
+    const term = monthlyQuery.trim().toLocaleLowerCase("es");
+    return monthlyPlan.analysis.filter((item) =>
+      !term ||
+      `${item.materialCode} ${item.description}`
+        .toLocaleLowerCase("es")
+        .includes(term),
+    );
+  }, [monthlyPlan, monthlyQuery]);
+  const monthlyShortages = useMemo(
+    () => monthlyPlan?.analysis.filter((item) => item.toBuy > 0) ?? [],
+    [monthlyPlan],
+  );
+  const monthlySummaries = useMemo(() => {
+    if (!monthlyPlan) return [];
+    const values = new Map<string, { key: string; label: string; boxes: number; bottles: number }>();
+    for (const estimate of monthlyPlan.estimates) {
+      for (const month of estimate.months) {
+        const current = values.get(month.key) ?? {
+          key: month.key,
+          label: month.label,
+          boxes: 0,
+          bottles: 0,
+        };
+        current.boxes += month.boxes;
+        current.bottles += month.boxes * estimate.presentation;
+        values.set(month.key, current);
+      }
+    }
+    return [...values.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }, [monthlyPlan]);
   const visibleUsers = useMemo(() => {
     const term = userQuery.trim().toLocaleLowerCase("es");
     return term
@@ -591,14 +661,14 @@ export default function Home() {
         error?: string;
       };
       if (!response.ok)
-        throw new Error(payload.error || "No se pudieron cargar las BOM.");
+        throw new Error(payload.error || "No se pudieron cargar las fichas técnicas.");
       setBomProducts(payload.products ?? []);
       setBomMessage("");
     } catch (error) {
       setBomMessage(
         error instanceof Error
           ? error.message
-          : "No se pudieron cargar las BOM.",
+          : "No se pudieron cargar las fichas técnicas.",
       );
     } finally {
       setBomLoading(false);
@@ -615,13 +685,13 @@ export default function Home() {
       });
       const payload = (await response.json()) as { error?: string };
       if (!response.ok)
-        throw new Error(payload.error || "No se pudo guardar la BOM.");
+        throw new Error(payload.error || "No se pudo guardar la ficha técnica.");
       setBomDraft({ code: "", name: "", items: [emptyBomItem()] });
       await loadBoms();
-      setBomMessage("BOM guardada correctamente.");
+      setBomMessage("Ficha técnica guardada correctamente.");
     } catch (error) {
       setBomMessage(
-        error instanceof Error ? error.message : "No se pudo guardar la BOM.",
+        error instanceof Error ? error.message : "No se pudo guardar la ficha técnica.",
       );
     } finally {
       setBomLoading(false);
@@ -650,42 +720,47 @@ export default function Home() {
     );
   };
   const loadRequirements = useCallback(async () => {
-    setRequirementState((state) => ({ ...state, loading: true, error: "" }));
-    try {
-      const response = await fetch("/api/requirements", { cache: "no-store" });
-      const payload = await responseJson<{
-        requirements?: Requirement[];
-        shortages?: Array<
-          Requirement & { available: number; shortage: number }
-        >;
-        mappedOperations?: number;
-        blockedOperations?: number;
-        provisionalProducts?: number;
-        stockItems?: number;
-        error?: string;
-      }>(response);
-      if (!response.ok)
-        throw new Error(payload.error || "No se pudo calcular el consumo.");
-      setRequirements(payload.requirements ?? []);
-      setShortages(payload.shortages ?? []);
-      setRequirementState({
-        loading: false,
-        mapped: payload.mappedOperations ?? 0,
-        blocked: payload.blockedOperations ?? 0,
-        provisional: payload.provisionalProducts ?? 0,
-        stockItems: payload.stockItems ?? 0,
-        error: "",
-      });
-    } catch (error) {
-      setRequirementState((state) => ({
-        ...state,
-        loading: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "No se pudo calcular el consumo.",
-      }));
-    }
+    if(requirementsPromiseRef.current)return requirementsPromiseRef.current;
+    const operation=(async()=>{
+      setRequirementState((state) => ({ ...state, loading: true, error: "" }));
+      try {
+        const response = await fetchWithRetry("/api/requirements", { cache: "no-store" });
+        const payload = await responseJson<{
+          requirements?: Requirement[];
+          shortages?: Array<
+            Requirement & { available: number; shortage: number }
+          >;
+          mappedOperations?: number;
+          blockedOperations?: number;
+          completedOperations?: number;
+          provisionalProducts?: number;
+          stockItems?: number;
+          error?: string;
+        }>(response);
+        if (!response.ok)
+          throw new Error(payload.error || "No se pudo calcular el consumo.");
+        setRequirements(payload.requirements ?? []);
+        setShortages(payload.shortages ?? []);
+        setRequirementState({
+          loading: false,
+          mapped: payload.mappedOperations ?? 0,
+          blocked: payload.blockedOperations ?? 0,
+          completed: payload.completedOperations ?? 0,
+          provisional: payload.provisionalProducts ?? 0,
+          stockItems: payload.stockItems ?? 0,
+          error: "",
+        });
+      } catch (error) {
+        setRequirementState((state) => ({
+          ...state,
+          loading: false,
+          error:
+            `${error instanceof Error ? error.message : "No se pudo calcular el consumo."} Los valores que ves corresponden al último cálculo correcto.`,
+        }));
+      }
+    })();
+    requirementsPromiseRef.current=operation;
+    try{await operation;}finally{if(requirementsPromiseRef.current===operation)requirementsPromiseRef.current=null;}
   }, []);
   const loadStock = useCallback(async () => {
     const r = await fetch("/api/stock", { cache: "no-store" });
@@ -771,6 +846,7 @@ export default function Home() {
       const p = (await r.json()) as { imported?: number; error?: string };
       if (!r.ok) throw new Error(p.error || "No se pudo importar el stock.");
       await loadStock();
+      if(requirementsPromiseRef.current)await requirementsPromiseRef.current;
       await loadRequirements();
       setStockImport((current) => ({
         ...current,
@@ -873,6 +949,138 @@ export default function Home() {
     const safe=category.normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-zA-Z0-9_-]+/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"").slice(0,80)||"insumos";
     XLSX.writeFile(workbook,`reporte-compras-${safe}-${new Date().toISOString().slice(0,10)}.xlsx`);
   };
+  const loadMonthlyPlan = useCallback(async () => {
+    try {
+      const response = await fetchWithTimeout("/api/monthly-purchases", { cache: "no-store" }, 8_000);
+      const payload = await responseJson<{ plan?: StoredMonthlyPurchasePlan | null; error?: string }>(response);
+      if (!response.ok) throw new Error(payload.error || "No se pudo leer el análisis mensual.");
+      setMonthlyPlan(payload.plan ?? null);
+    } catch (error) {
+      setMonthlyState((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "No se pudo leer el análisis mensual.",
+      }));
+    }
+  }, []);
+  const selectMonthlyFile = async (file?: File) => {
+    if (!file) return;
+    setMonthlyState({ loading: true, message: "Leyendo las cuatro hojas…", error: "" });
+    try {
+      const XLSX = await import("xlsx");
+      const workbook = XLSX.read(await file.arrayBuffer(), {
+        type: "array",
+        cellDates: true,
+        cellFormula: true,
+      });
+      const sheets = Object.fromEntries(
+        workbook.SheetNames.map((name) => [
+          name,
+          XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], {
+            header: 1,
+            defval: "",
+            raw: true,
+          }),
+        ]),
+      );
+      const parsed = parseMonthlyPurchaseSheets(sheets, file.name);
+      setMonthlyDraft(parsed);
+      setMonthlyState({
+        loading: false,
+        message: `${parsed.estimates.length} productos y ${parsed.analysis.length} insumos listos para guardar.`,
+        error: "",
+      });
+    } catch (error) {
+      setMonthlyDraft(null);
+      setMonthlyState({
+        loading: false,
+        message: "",
+        error: error instanceof Error ? error.message : "No se pudo interpretar el archivo.",
+      });
+    } finally {
+      if (monthlyFileRef.current) monthlyFileRef.current.value = "";
+    }
+  };
+  const saveMonthlyPlan = async () => {
+    if (!monthlyDraft) return;
+    setMonthlyState({ loading: true, message: "Guardando el análisis para todos los usuarios…", error: "" });
+    try {
+      const response = await fetchWithTimeout("/api/monthly-purchases", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(monthlyDraft),
+      }, 15_000);
+      const payload = await responseJson<{ plan?: StoredMonthlyPurchasePlan; error?: string }>(response);
+      if (!response.ok || !payload.plan)
+        throw new Error(payload.error || "No se pudo guardar el análisis mensual.");
+      setMonthlyPlan(payload.plan);
+      setMonthlyDraft(null);
+      setMonthlyState({
+        loading: false,
+        message: "Análisis mensual guardado en Cloudflare D1 y disponible en todos los dispositivos.",
+        error: "",
+      });
+    } catch (error) {
+      setMonthlyState({
+        loading: false,
+        message: "",
+        error: error instanceof Error ? error.message : "No se pudo guardar el análisis mensual.",
+      });
+    }
+  };
+  const exportMonthlyPlan = async () => {
+    if (!monthlyPlan) return;
+    const XLSX = await import("xlsx");
+    const workbook = XLSX.utils.book_new();
+    const analysisRows = monthlyPlan.analysis.map((item) => ({
+      Código: item.materialCode,
+      Descripción: item.description,
+      Stock: item.stock,
+      Pendiente: item.pending,
+      Necesidad: item.necessity,
+      "Saldo (Stock + Pendiente - Necesidad)": item.balance,
+      "Cantidad a comprar": item.toBuy,
+      Estado: item.toBuy > 0 ? "COMPRAR" : "CUBIERTO",
+      Observación: item.note,
+    }));
+    const analysisSheet = XLSX.utils.json_to_sheet(analysisRows);
+    analysisSheet["!cols"] = [
+      { wch: 18 }, { wch: 42 }, { wch: 16 }, { wch: 16 }, { wch: 16 },
+      { wch: 34 }, { wch: 20 }, { wch: 14 }, { wch: 30 },
+    ];
+    if (analysisSheet["!ref"]) analysisSheet["!autofilter"] = { ref: analysisSheet["!ref"] };
+    XLSX.utils.book_append_sheet(workbook, analysisSheet, "Análisis");
+
+    const estimateRows = monthlyPlan.estimates.map((item) => ({
+      Código: item.productCode,
+      Producto: item.description,
+      Presentación: item.presentation,
+      ...Object.fromEntries(item.months.map((month) => [`Cajas ${month.label}`, month.boxes])),
+      "Total cajas": item.totalBoxes,
+      "Total botellas": item.totalBottles,
+      Botella: item.materials.bottle,
+      Tapón: item.materials.cork,
+      Tapa: item.materials.cap,
+      Cápsula: item.materials.capsule,
+      Caja: item.materials.box,
+    }));
+    const estimateSheet = XLSX.utils.json_to_sheet(estimateRows);
+    estimateSheet["!cols"] = [
+      { wch: 18 }, { wch: 38 }, { wch: 14 },
+      ...monthlySummaries.map(() => ({ wch: 20 })),
+      { wch: 16 }, { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 },
+    ];
+    if (estimateSheet["!ref"]) estimateSheet["!autofilter"] = { ref: estimateSheet["!ref"] };
+    XLSX.utils.book_append_sheet(workbook, estimateSheet, "Estimado");
+    XLSX.writeFile(
+      workbook,
+      `analisis-compras-${monthlyPlan.periodLabel
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .toLowerCase()}.xlsx`,
+    );
+  };
   const emptyUserDraft = () => ({
     id: 0,
     email: "",
@@ -882,7 +1090,7 @@ export default function Home() {
     role: "planner",
     active: true,
     permissions:
-      "resumen,programacion,mensual,productos,consumos,stock,faltantes,compras",
+      "resumen,programacion,productos,consumos,stock,faltantes,compras",
   });
   const loadUsers = useCallback(async () => {
     const r = await fetch("/api/users", { cache: "no-store" });
@@ -959,17 +1167,22 @@ export default function Home() {
   const login = async () => {
     setAuthLoading(true);
     setLoginError("");
-    const r = await fetch("/api/auth", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(loginDraft),
-    });
-    const p = (await r.json()) as { user?: typeof session; error?: string };
-    if (r.ok && p.user) {
-      setSession(p.user);
-      setLoginDraft({ username: "", password: "" });
-    } else setLoginError(p.error || "No se pudo iniciar sesión.");
-    setAuthLoading(false);
+    try {
+      const r = await fetchWithTimeout("/api/auth", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(loginDraft),
+      }, 12_000);
+      const p = await responseJson<{ user?: typeof session; error?: string }>(r);
+      if (r.ok && p.user) {
+        setSession(p.user);
+        setLoginDraft({ username: "", password: "" });
+      } else setLoginError(p.error || "No se pudo iniciar sesión.");
+    } catch {
+      setLoginError("El servidor demoró demasiado. Volvé a intentar en unos segundos.");
+    } finally {
+      setAuthLoading(false);
+    }
   };
   const logout = async () => {
     setProfileOpen(false);
@@ -988,135 +1201,190 @@ export default function Home() {
   };
 
   const refreshProgram = useCallback(async (force=false) => {
-    if(refreshingRef.current)return;
-    refreshingRef.current=true;
-    setRefreshing(true);
-    try {
-      const response = await fetch(force?"/api/program?fresh=1":"/api/program", { cache: "no-store" });
-      if (!response.ok) throw new Error("No se pudo actualizar");
-      const payload = await responseJson<{
+    if(refreshPromiseRef.current)return refreshPromiseRef.current;
+    const operation=(async()=>{
+      setRefreshing(true);
+      const applyPayload=(payload:{
         source?: { live?: boolean; fetchedAt?: string; notice?: string };
         records?: ProgramRecord[];
-      }>(response);
-      if (Array.isArray(payload.records)) {
-        if (liveRef.current && payload.source?.live) {
-          const change = diffProgram(recordsRef.current, payload.records);
-          if (change.total)
-            setProgramChange({
-              ...change,
-              detectedAt: new Date().toISOString(),
-            });
+      })=>{
+        let changed=false;
+        if (Array.isArray(payload.records)) {
+          if (liveRef.current && payload.source?.live) {
+            const change = diffProgram(recordsRef.current, payload.records);
+            changed=change.total>0;
+            if (change.total)
+              setProgramChange({
+                ...change,
+                detectedAt: new Date().toISOString(),
+              });
+          }
+          recordsRef.current = payload.records;
+          setRecords(payload.records);
         }
-        recordsRef.current = payload.records;
-        setRecords(payload.records);
+        liveRef.current = Boolean(payload.source?.live);
+        setSourceState({
+          live: Boolean(payload.source?.live),
+          fetchedAt: payload.source?.fetchedAt ?? PROGRAM_SOURCE.capturedAt,
+          notice:
+            payload.source?.notice ??
+            (payload.source?.live
+              ? "Google Sheets se comprueba automáticamente cada 30 segundos."
+              : "Se conserva la última lectura validada."),
+        });
+        return changed;
+      };
+      try {
+        const response = await fetchWithRetry(
+          force ? "/api/program?fresh=1" : "/api/program?background=1",
+          { cache: "no-store" },
+          force ? 20_000 : 7_000,
+        );
+        if (!response.ok) throw new Error("No se pudo actualizar");
+        const payload = await responseJson<{
+          source?: { live?: boolean; fetchedAt?: string; notice?: string };
+          records?: ProgramRecord[];
+        }>(response);
+        const changed=applyPayload(payload);
+        if (!force) {
+          if (programPollTimerRef.current)
+            window.clearTimeout(programPollTimerRef.current);
+          programPollTimerRef.current=window.setTimeout(() => {
+            void (async()=>{
+              try{
+                const storedResponse=await fetchWithTimeout(
+                  "/api/program?stored=1",
+                  {cache:"no-store"},
+                  6_000,
+                );
+                if(!storedResponse.ok)return;
+                const storedPayload=await responseJson<{
+                  source?: { live?: boolean; fetchedAt?: string; notice?: string };
+                  records?: ProgramRecord[];
+                }>(storedResponse);
+                if(applyPayload(storedPayload))await loadRequirements();
+              }catch{
+                // La próxima comprobación de 30 segundos vuelve a intentarlo.
+              }
+            })();
+          },7_000);
+        }
+        return{changed,live:Boolean(payload.source?.live)};
+      } catch {
+        setSourceState((current) => ({
+          ...current,
+          live: false,
+          notice:
+            "No se pudo actualizar; se conservan la programación y los cálculos de la última lectura válida.",
+        }));
+        return{changed:false,live:false};
+      } finally {
+        setRefreshing(false);
       }
-      liveRef.current = Boolean(payload.source?.live);
-      setSourceState({
-        live: Boolean(payload.source?.live),
-        fetchedAt: payload.source?.fetchedAt ?? PROGRAM_SOURCE.capturedAt,
-        notice:
-          payload.source?.notice ??
-          (payload.source?.live
-            ? "Google Sheets se actualiza automáticamente cada 30 segundos."
-            : "Se conserva la última lectura validada."),
-      });
-    } catch {
-      setSourceState((current) => ({
-        ...current,
-        live: false,
-        notice:
-          "No se pudo actualizar; se conserva la última lectura validada.",
-      }));
-    } finally {
-      refreshingRef.current=false;
-      setRefreshing(false);
+    })();
+    refreshPromiseRef.current=operation;
+    try{return await operation;}finally{if(refreshPromiseRef.current===operation)refreshPromiseRef.current=null;}
+  }, [loadRequirements]);
+
+  const loadSettings=useCallback(async()=>{try{const response=await fetchWithTimeout("/api/settings",{cache:"no-store"},6_000);const payload=await responseJson<{settings?:OperationalSettings}>(response);if(response.ok&&payload.settings){setSettings(payload.settings);setSettingsDraft(payload.settings);}}catch{}},[]);
+  const synchronizeProgram=useCallback(async(force=false,recalculate=false)=>{
+    const result=await refreshProgram(force);
+    if(recalculate||result.changed){
+      if(requirementsPromiseRef.current)await requirementsPromiseRef.current;
+      await loadRequirements();
     }
-  }, []);
-
-  const loadSettings=useCallback(async()=>{try{const response=await fetch("/api/settings",{cache:"no-store"});const payload=await responseJson<{settings?:OperationalSettings}>(response);if(response.ok&&payload.settings){setSettings(payload.settings);setSettingsDraft(payload.settings);}}catch{}},[]);
-  const saveSettings=async()=>{setSettingsMessage("Guardando…");try{const response=await fetch("/api/settings",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(settingsDraft)});const payload=await responseJson<{settings?:OperationalSettings;error?:string}>(response);if(!response.ok||!payload.settings)throw new Error(payload.error||"No se pudo guardar.");setSettings(payload.settings);setSettingsDraft(payload.settings);setSettingsMessage("Configuración guardada en Cloudflare D1.");await refreshProgram(true);}catch(error){setSettingsMessage(error instanceof Error?error.message:"No se pudo guardar.");}};
+    return result;
+  },[refreshProgram,loadRequirements]);
+  const saveSettings=async()=>{setSettingsMessage("Guardando…");try{const response=await fetch("/api/settings",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify(settingsDraft)});const payload=await responseJson<{settings?:OperationalSettings;error?:string}>(response);if(!response.ok||!payload.settings)throw new Error(payload.error||"No se pudo guardar.");setSettings(payload.settings);setSettingsDraft(payload.settings);setSettingsMessage("Configuración guardada en Cloudflare D1.");await synchronizeProgram(true,true);}catch(error){setSettingsMessage(error instanceof Error?error.message:"No se pudo guardar.");}};
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void refreshProgram(), 0);
-    const timer = window.setInterval(() => {if(document.visibilityState==="visible")void refreshProgram();}, settings.syncIntervalSeconds*1000);
+    if(!session)return;
+    const timer = window.setInterval(() => {if(document.visibilityState==="visible")void synchronizeProgram();}, settings.syncIntervalSeconds*1000);
+    const onVisible=()=>{if(document.visibilityState==="visible")void synchronizeProgram();};
+    document.addEventListener("visibilitychange",onVisible);
     return () => {
-      window.clearTimeout(initial);
       window.clearInterval(timer);
+      if(programPollTimerRef.current)window.clearTimeout(programPollTimerRef.current);
+      document.removeEventListener("visibilitychange",onVisible);
     };
-  }, [refreshProgram,settings.syncIntervalSeconds]);
+  }, [session,synchronizeProgram,settings.syncIntervalSeconds]);
   useEffect(() => {
-    void fetch("/api/auth", { cache: "no-store" })
+    let active=true;
+    const watchdog=window.setTimeout(()=>{
+      if(active)setAuthLoading(false);
+    },6_000);
+    void fetchWithTimeout("/api/auth", { cache: "no-store" },5_500)
       .then(async (r) => {
-        const p = (await r.json()) as { user?: typeof session };
-        if (r.ok && p.user) setSession(p.user);
+        const p = await responseJson<{ user?: typeof session }>(r);
+        if (active&&r.ok && p.user) setSession(p.user);
       })
-      .finally(() => setAuthLoading(false));
+      .catch(()=>null)
+      .finally(() => {
+        if(active)setAuthLoading(false);
+        window.clearTimeout(watchdog);
+      });
+    return()=>{active=false;window.clearTimeout(watchdog);};
   }, []);
   useEffect(() => {
     if (!session) return;
-    void Promise.all([loadBoms(), loadStock(), loadRequirements(),loadSettings()]);
-  }, [session, loadBoms, loadStock, loadRequirements,loadSettings]);
+    let active=true;
+    void (async()=>{
+      await loadSettings();
+      if(!active)return;
+      await Promise.allSettled([
+        synchronizeProgram(),
+        loadBoms(),
+        loadStock(),
+        loadRequirements(),
+        loadMonthlyPlan(),
+      ]);
+    })();
+    return()=>{active=false;};
+  }, [session, loadBoms, loadStock, loadRequirements,loadSettings,synchronizeProgram,loadMonthlyPlan]);
 
   const canAccess = (target: string) =>
     session?.role === "admin" ||
     target === "resumen" ||
     (session?.permissions ?? "").split(",").includes(target);
-  const askAssistant = (question: string) => {
+  const askAssistant = async (question: string) => {
     const clean = question.trim();
-    if (!clean) return;
-    const term = clean.toLocaleLowerCase("es");
-    let answer =
-      "No encontré una coincidencia. Probá indicando un código de producto o insumo.";
-    const codes = [
-      ...new Set(
-        [
-          ...stock.map((item) => item.materialCode),
-          ...requirements.map((item) => item.materialCode),
-          ...records.map((item) => item.productCode),
-        ].filter(Boolean),
-      ),
-    ];
-    const code = codes.find((value) =>term.includes(value.toLocaleLowerCase("es")))??stock.find(item=>term.includes(item.materialName.toLocaleLowerCase("es")))?.materialCode;
-    if (/^(hola|buen dia|buenas|buenos dias|hello)\b/.test(term)) answer=`¡Hola ${session?.name?.split(" ")[0]??""}! ¿Revisamos stock, faltantes, compras o la programación de esta semana?`;
-    else if(term.includes("gracias"))answer="¡De nada! Si querés, también puedo buscar otro insumo o decirte cuáles son las compras más urgentes.";
-    else if (code) {
-      const stockItem = stock.find((item) => item.materialCode === code),
-        requirement = requirements.find((item) => item.materialCode === code),
-        productRows = records.filter((item) => item.productCode === code);
-      if (stockItem || requirement) {
-        const shortage = shortages.find((item) => item.materialCode === code);
-        answer = `Encontré ${stockItem?.materialName??code} (${code}). Tenés ${formatNumber(stockItem?.quantity ?? 0)} ${stockItem?.unit??"unidades"}${requirement ? ` y el programa necesita ${formatNumber(requirement.total)}` : ""}${shortage ? `. Faltan ${formatNumber(shortage.shortage)}, por lo que conviene incluirlo en Compras` : ". Por ahora el stock alcanza"}.${
-          requirement?.products.length
-            ? ` Lo consumen ${requirement.products
-                .map((product) => product.productCode)
-                .slice(0, 6)
-                .join(", ")}.`
-            : ""
-        }`;
-      } else if (productRows.length)
-        answer = `El producto ${code} aparece en ${productRows.length} operaciones: ${formatNumber(productRows.reduce((sum, row) => sum + row.bottles, 0))} botellas en ${[...new Set(productRows.map((row) => row.weekLabel))].join(", ")}. ¿Querés revisar alguno de sus insumos?`;
-    } else if (term.includes("compr") || term.includes("falt"))
-      answer = shortages.length
-        ? `Ahora mismo veo ${shortages.length} insumos con faltante. Empezaría por estos: ${[
-            ...shortages,
-          ]
-            .sort((a, b) => b.shortage - a.shortage)
-            .slice(0, 5)
-            .map(
-              (item) => `${item.materialCode} (${formatNumber(item.shortage)})`,
-            )
-            .join(", ")}. Si me indicás uno, te doy su necesidad, stock y productos asociados.`
-        : "Buenas noticias: con la información cargada no hay faltantes calculados en este momento.";
-    else if (term.includes("semana") || term.includes("produc"))
-      answer = `La programación tiene ${records.length} operaciones repartidas en ${weeks.length} semanas: ${weeks.map((week) => `${week.label} (${week.operations})`).join(", ")}. ¿Querés que busque un producto específico?`;
-    else if (term.includes("stock"))
-      answer = `El último reporte tiene ${stock.length} insumos cargados. Decime un código o parte del nombre —por ejemplo “tapón” o “cápsula”— y te digo cuánto hay y si alcanza.`;
-    setChatMessages((messages) => [
-      ...messages,
-      { from: "user", text: clean },
-      { from: "bot", text: answer },
-    ]);
+    if (!clean||chatLoading) return;
+    const dateTime=(value:string)=>{
+      const parsed=new Date(value);
+      return Number.isNaN(parsed.getTime())?"sin fecha disponible":new Intl.DateTimeFormat("es-AR",{dateStyle:"short",timeStyle:"short"}).format(parsed);
+    };
+    const context:GeneralAssistantContext={
+      now:new Intl.DateTimeFormat("es-AR",{dateStyle:"full",timeStyle:"short"}).format(new Date()),
+      synchronized:sourceState.live,
+      fetchedAt:dateTime(sourceState.fetchedAt),
+      operations:records.length,
+      weeks:weeks.length,
+      completedOperations:records.filter(record=>record.completed).length,
+      mappedOperations:requirementState.mapped,
+      blockedOperations:requirementState.blocked,
+      shortages:shortages.length,
+      stockItems:stock.length,
+      changes:{
+        added:programChange.added,
+        modified:programChange.modified,
+        removed:programChange.removed,
+        detectedAt:programChange.detectedAt,
+      },
+    };
+    setChatMessages(messages=>[...messages,{from:"user",text:clean}]);
     setChatInput("");
+    setChatLoading(true);
+    let answer=generalAssistantFallback(clean,context);
+    try{
+      const response=await fetch("/api/assistant",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({question:clean,context})});
+      const payload=await responseJson<{answer?:string;error?:string}>(response);
+      if(response.ok&&payload.answer)answer=payload.answer;
+    }catch{
+      // La respuesta local mantiene disponible el asistente aunque falle la IA.
+    }finally{
+      setChatMessages(messages=>[...messages,{from:"bot",text:answer}]);
+      setChatLoading(false);
+    }
   };
   const navigate = (target: string) => {
     if (!canAccess(target)) return;
@@ -1124,7 +1392,6 @@ export default function Home() {
       [
         "resumen",
         "programacion",
-        "mensual",
         "productos",
         "bom",
         "consumos",
@@ -1139,6 +1406,7 @@ export default function Home() {
       if (["consumos", "faltantes", "compras"].includes(target))
         void loadRequirements();
       if (target === "stock") void loadStock();
+      if (target === "compras") void loadMonthlyPlan();
       if (target === "usuarios") void loadUsers();
     } else setView("pendiente");
   };
@@ -1195,7 +1463,6 @@ export default function Home() {
           <button className="primary-button" disabled={authLoading}>
             {authLoading ? "Ingresando…" : "Ingresar"}
           </button>
-          <small>Acceso inicial de prueba: admin / 1234</small>
         </form>
       </main>
     );
@@ -1216,9 +1483,8 @@ export default function Home() {
           {[
             ["resumen", "Resumen"],
             ["programacion", "Programación"],
-            ["mensual", "Plan mensual"],
             ["productos", "Productos"],
-            ["bom", "BOM"],
+            ["bom", "Ficha técnica"],
             ["consumos", "Consumos"],
             ["stock", "Stock"],
             ["faltantes", "Faltantes"],
@@ -1243,7 +1509,6 @@ export default function Home() {
                 {![
                   "resumen",
                   "programacion",
-                  "mensual",
                   "productos",
                   "bom",
                   "consumos",
@@ -1303,7 +1568,7 @@ export default function Home() {
               </div>
               <button
                 className="refresh-button"
-                onClick={() => void refreshProgram(true)}
+                onClick={() => void synchronizeProgram(true)}
                 disabled={refreshing}
               >
                 <Icon name="sync" />{" "}
@@ -1476,7 +1741,7 @@ export default function Home() {
                     </h2>
                     <p>
                       {requirementState.loading
-                        ? "Actualizando BOM, stock y programa."
+                        ? "Actualizando fichas técnicas, stock y programa."
                         : `${requirementState.mapped} operaciones calculadas con el programa vigente.`}
                     </p>
                   </div>
@@ -1493,7 +1758,7 @@ export default function Home() {
                   <div className={requirementState.mapped > 0 ? "ready" : ""}>
                     <span>2</span>
                     <div>
-                      <strong>Fichas técnicas BOM</strong>
+                      <strong>Fichas técnicas</strong>
                       <small>
                         {bomProducts.length} aprobadas ·{" "}
                         {requirementState.provisional} provisionales del Sheet
@@ -1622,7 +1887,7 @@ export default function Home() {
                   <strong>
                     {missingCodeRecords.length} incidencia crítica
                   </strong>
-                  <small>Impide relacionar una fila con su BOM</small>
+                  <small>Impide relacionar una fila con su ficha técnica</small>
                 </div>
               </article>
             </div>
@@ -1641,7 +1906,7 @@ export default function Home() {
                     <p>{sourceState.notice}</p>
                   </div>
                   <button
-                    onClick={() => void refreshProgram(true)}
+                    onClick={() => void synchronizeProgram(true)}
                     disabled={refreshing}
                   >
                     {refreshing ? "Actualizando…" : "Actualizar"}
@@ -1774,6 +2039,7 @@ export default function Home() {
                                   <tr
                                     key={record.id}
                                     data-warning={!record.productCode}
+                                    data-completed={record.completed||undefined}
                                   >
                                     <td>{record.dateLabel || "—"}</td>
                                     <td>
@@ -1782,6 +2048,7 @@ export default function Home() {
                                       >
                                         {record.action}
                                       </span>
+                                      {record.completed&&<span className="completed-badge">REALIZADO</span>}
                                     </td>
                                     <td>{record.pin || "—"}</td>
                                     <td className="number-cell">
@@ -1863,7 +2130,7 @@ export default function Home() {
                   <div>
                     <strong>Códigos de insumos todavía incompletos</strong>
                     <p>
-                      Se resolverán con la BOM del ERP, sin depender de la carga
+                      Se resolverán con la ficha técnica del ERP, sin depender de la carga
                       tardía del Sheet.
                     </p>
                     <small>
@@ -1885,8 +2152,6 @@ export default function Home() {
           </section>
         )}
 
-        {view === "mensual" && <MonthlyPlanning />}
-
         {view === "productos" && (
           <section className="program-view">
             <div className="page-heading compact">
@@ -1902,7 +2167,7 @@ export default function Home() {
               </div>
               <button
                 className="refresh-button"
-                onClick={() => void refreshProgram(true)}
+                onClick={() => void synchronizeProgram(true)}
               >
                 {refreshing ? "Actualizando…" : "Actualizar"}
               </button>
@@ -2023,7 +2288,7 @@ export default function Home() {
             <div className="page-heading compact">
               <div>
                 <p className="eyebrow">Prioridad 4 · Fichas técnicas</p>
-                <h1>Productos y BOM</h1>
+                <h1>Fichas técnicas</h1>
                 <p>
                   Definí qué consume cada producto según la operación
                   programada.
@@ -2043,7 +2308,7 @@ export default function Home() {
               </article>
               <article>
                 <strong>{bomProducts.length}</strong>
-                <span>BOM aprobadas</span>
+                <span>fichas aprobadas</span>
               </article>
               <article>
                 <strong>{productsWithSheetMaterials.length}</strong>
@@ -2127,7 +2392,7 @@ export default function Home() {
                   <div>
                     <h2>
                       {bomDraft.code
-                        ? `BOM ${bomDraft.code}`
+                        ? `Ficha ${bomDraft.code}`
                         : "Nueva ficha técnica"}
                     </h2>
                     <p>El consumo se expresa por botella o unidad producida.</p>
@@ -2333,28 +2598,335 @@ export default function Home() {
           </section>
         )}
 
-        {view === "consumos" && (
+        {(view === "consumos" ||
+          (view === "compras" && purchaseMode === "monthly")) && (
           <section className="consumption-view">
             <div className="page-heading compact">
               <div>
-                <p className="eyebrow">Prioridad 5 · Motor de cálculo</p>
-                <h1>Consumo de insumos</h1>
+                <p className="eyebrow">
+                  {view === "compras"
+                    ? "Planificación mensual"
+                    : "Prioridad 5 · Motor de cálculo"}
+                </p>
+                <h1>
+                  {view === "compras"
+                    ? "Análisis mensual de compras"
+                    : "Consumo de insumos"}
+                </h1>
                 <p>
-                  Demanda calculada desde el programa vigente y las BOM
-                  aprobadas.
+                  {view === "compras"
+                    ? "Estimado, stock, pendiente y saldo de compra en un solo lugar."
+                    : "Demanda calculada desde el programa vigente y las fichas técnicas aprobadas."}
                 </p>
               </div>
               <button
                 className="refresh-button"
-                onClick={() => void loadRequirements()}
+                onClick={() =>
+                  view === "compras" && purchaseMode === "monthly"
+                    ? void loadMonthlyPlan()
+                    : void loadRequirements()
+                }
               >
-                {requirementState.loading ? "Calculando…" : "Recalcular"}
+                {view === "compras" && purchaseMode === "monthly"
+                  ? monthlyState.loading
+                    ? "Actualizando…"
+                    : "Actualizar análisis"
+                  : requirementState.loading
+                    ? "Calculando…"
+                    : "Recalcular"}
               </button>
             </div>
+            {view === "compras" && (
+              <nav className="purchase-mode-tabs" aria-label="Tipo de análisis de compras">
+                <button
+                  data-active={purchaseMode === "weekly"}
+                  onClick={() => setPurchaseMode("weekly")}
+                >
+                  Programa semanal
+                </button>
+                <button
+                  data-active={purchaseMode === "monthly"}
+                  onClick={() => {
+                    setPurchaseMode("monthly");
+                    void loadMonthlyPlan();
+                  }}
+                >
+                  Análisis mensual
+                </button>
+              </nav>
+            )}
+            {view === "compras" && purchaseMode === "monthly" ? (
+              <div className="monthly-purchase-view">
+                <article className="monthly-import-card">
+                  <div>
+                    <p className="eyebrow">Fuente del análisis</p>
+                    <h2>
+                      {monthlyPlan
+                        ? `${monthlyPlan.periodLabel} · ${monthlyPlan.fileName}`
+                        : "Cargar estimado, stock, pendiente y análisis"}
+                    </h2>
+                    <p>
+                      La aplicación lee las hojas ESTIMADO, STOCK, PENDIENTE y
+                      ANALISIS. El saldo se recalcula siempre como Stock +
+                      Pendiente − Necesidad.
+                    </p>
+                    {monthlyPlan && (
+                      <small>
+                        Guardado por {monthlyPlan.importedBy} el{" "}
+                        {new Intl.DateTimeFormat("es-AR", {
+                          dateStyle: "short",
+                          timeStyle: "short",
+                        }).format(new Date(monthlyPlan.importedAt))}
+                      </small>
+                    )}
+                  </div>
+                  <div className="monthly-import-actions">
+                    <input
+                      ref={monthlyFileRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      hidden
+                      onChange={(event) =>
+                        void selectMonthlyFile(event.target.files?.[0])
+                      }
+                    />
+                    <button
+                      className="secondary-button"
+                      disabled={monthlyState.loading}
+                      onClick={() => monthlyFileRef.current?.click()}
+                    >
+                      {monthlyPlan ? "Reemplazar archivo" : "Seleccionar Excel"}
+                    </button>
+                    {monthlyPlan && (
+                      <button
+                        className="export-button"
+                        onClick={() => void exportMonthlyPlan()}
+                      >
+                        Exportar análisis
+                      </button>
+                    )}
+                  </div>
+                </article>
+
+                {monthlyDraft && (
+                  <article className="monthly-preview">
+                    <div>
+                      <strong>{monthlyDraft.periodLabel}</strong>
+                      <span>
+                        {monthlyDraft.estimates.length} productos ·{" "}
+                        {monthlyDraft.analysis.length} insumos analizados ·{" "}
+                        {monthlyDraft.sourceCounts.stockRows} filas de stock ·{" "}
+                        {monthlyDraft.sourceCounts.pendingRows} filas pendientes
+                      </span>
+                    </div>
+                    <button
+                      className="primary-button"
+                      disabled={monthlyState.loading}
+                      onClick={() => void saveMonthlyPlan()}
+                    >
+                      {monthlyState.loading ? "Guardando…" : "Guardar para todos"}
+                    </button>
+                  </article>
+                )}
+                {monthlyState.message && (
+                  <p className="bom-message">{monthlyState.message}</p>
+                )}
+                {monthlyState.error && (
+                  <p className="bom-message consumption-error">
+                    {monthlyState.error}
+                  </p>
+                )}
+
+                {!monthlyPlan ? (
+                  <article className="empty-consumption">
+                    <h2>Todavía no hay un análisis mensual compartido</h2>
+                    <p>
+                      Seleccioná el Excel consolidado. Antes de guardarlo se
+                      mostrará cuántos productos e insumos fueron reconocidos.
+                    </p>
+                  </article>
+                ) : (
+                  <>
+                    <div className="monthly-kpis">
+                      <article>
+                        <strong>{monthlyPlan.estimates.length}</strong>
+                        <span>productos estimados</span>
+                      </article>
+                      <article>
+                        <strong>
+                          {formatNumber(
+                            monthlyPlan.estimates.reduce(
+                              (sum, item) => sum + item.totalBottles,
+                              0,
+                            ),
+                          )}
+                        </strong>
+                        <span>botellas estimadas</span>
+                      </article>
+                      <article data-warning={monthlyShortages.length > 0}>
+                        <strong>{monthlyShortages.length}</strong>
+                        <span>insumos con saldo negativo</span>
+                      </article>
+                      <article data-warning={monthlyShortages.length > 0}>
+                        <strong>
+                          {formatNumber(
+                            monthlyShortages.reduce(
+                              (sum, item) => sum + item.toBuy,
+                              0,
+                            ),
+                          )}
+                        </strong>
+                        <span>unidades a comprar</span>
+                      </article>
+                    </div>
+
+                    <div className="monthly-months">
+                      {monthlySummaries.map((month) => (
+                        <article key={month.key}>
+                          <span>{month.label}</span>
+                          <strong>{formatNumber(month.boxes)} cajas</strong>
+                          <small>{formatNumber(month.bottles)} botellas</small>
+                        </article>
+                      ))}
+                    </div>
+
+                    <article className="table-card">
+                      <div className="table-toolbar">
+                        <div>
+                          <h2>Análisis automático de compra</h2>
+                          <p>
+                            Un saldo negativo se transforma en cantidad positiva
+                            a comprar.
+                          </p>
+                        </div>
+                        <label className="search-box">
+                          <Icon name="search" />
+                          <input
+                            value={monthlyQuery}
+                            onChange={(event) => setMonthlyQuery(event.target.value)}
+                            placeholder="Buscar código o descripción"
+                          />
+                        </label>
+                      </div>
+                      <div className="monthly-formula">
+                        <span>Stock</span>
+                        <b>+</b>
+                        <span>Pendiente</span>
+                        <b>−</b>
+                        <span>Necesidad</span>
+                        <b>=</b>
+                        <strong>Saldo</strong>
+                      </div>
+                      <div className="table-scroll">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Código</th>
+                              <th>Descripción</th>
+                              <th>Stock</th>
+                              <th>Pendiente</th>
+                              <th>Necesidad</th>
+                              <th>Saldo</th>
+                              <th>Comprar</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {monthlyAnalysis.map((item) => (
+                              <tr
+                                key={item.materialCode}
+                                data-warning={item.toBuy > 0}
+                              >
+                                <td className="number-cell">{item.materialCode}</td>
+                                <td>
+                                  {item.description}
+                                  {item.note && (
+                                    <small className="cell-detail">{item.note}</small>
+                                  )}
+                                </td>
+                                <td>{formatNumber(item.stock)}</td>
+                                <td>{formatNumber(item.pending)}</td>
+                                <td>{formatNumber(item.necessity)}</td>
+                                <td className={item.balance < 0 ? "negative-balance" : "positive-balance"}>
+                                  {formatNumber(item.balance)}
+                                </td>
+                                <td className="number-cell purchase-quantity">
+                                  {item.toBuy > 0 ? formatNumber(item.toBuy) : "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </article>
+
+                    <article className="table-card">
+                      <div className="table-toolbar">
+                        <div>
+                          <h2>Estimado por producto y mes</h2>
+                          <p>
+                            Presentación, cajas, botellas y códigos de insumos
+                            tomados del archivo.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="table-scroll">
+                        <table className="monthly-estimate-table">
+                          <thead>
+                            <tr>
+                              <th>Código</th>
+                              <th>Producto</th>
+                              <th>Presentación</th>
+                              {monthlySummaries.map((month) => (
+                                <th key={month.key}>{month.label}</th>
+                              ))}
+                              <th>Total cajas</th>
+                              <th>Total botellas</th>
+                              <th>Botella</th>
+                              <th>Cierre</th>
+                              <th>Cápsula</th>
+                              <th>Caja</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {monthlyPlan.estimates.map((item) => (
+                              <tr key={item.productCode}>
+                                <td className="number-cell">{item.productCode}</td>
+                                <td>{item.description}</td>
+                                <td>{formatNumber(item.presentation)}</td>
+                                {monthlySummaries.map((month) => (
+                                  <td key={month.key}>
+                                    {formatNumber(
+                                      item.months.find(
+                                        (value) => value.key === month.key,
+                                      )?.boxes ?? 0,
+                                    )}
+                                  </td>
+                                ))}
+                                <td>{formatNumber(item.totalBoxes)}</td>
+                                <td>{formatNumber(item.totalBottles)}</td>
+                                <td>{item.materials.bottle || "—"}</td>
+                                <td>
+                                  {item.materials.cork ||
+                                    item.materials.cap ||
+                                    "—"}
+                                </td>
+                                <td>{item.materials.capsule || "—"}</td>
+                                <td>{item.materials.box || "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </article>
+                  </>
+                )}
+              </div>
+            ) : (
+              <>
             <div className="bom-kpis">
               <article>
                 <strong>{requirementState.mapped}</strong>
-                <span>operaciones con BOM</span>
+                <span>operaciones con ficha técnica</span>
               </article>
               <article data-warning={requirementState.blocked > 0}>
                 <strong>{requirementState.blocked}</strong>
@@ -2365,6 +2937,7 @@ export default function Home() {
                 <span>insumos calculados</span>
               </article>
             </div>
+            {requirementState.completed>0&&<p className="bom-message">{requirementState.completed} operaciones tachadas en Google Sheets se muestran como realizadas y fueron excluidas del consumo.</p>}
             {requirementState.error && (
               <p className="bom-message consumption-error">
                 {requirementState.error}
@@ -2377,7 +2950,7 @@ export default function Home() {
                 </span>
                 <h2>Esperando fichas técnicas</h2>
                 <p>
-                  El motor está listo. Cargá al menos una BOM para comenzar a
+                  El motor está listo. Cargá al menos una ficha técnica para comenzar a
                   calcular consumos reales; no se generan valores estimados.
                 </p>
                 <button
@@ -2387,7 +2960,7 @@ export default function Home() {
                     void loadBoms();
                   }}
                 >
-                  Cargar primera BOM
+                  Cargar primera ficha
                 </button>
               </article>
             ) : (
@@ -2448,6 +3021,8 @@ export default function Home() {
                   </table>
                 </div>
               </article>
+            )}
+              </>
             )}
           </section>
         )}
@@ -2636,7 +3211,8 @@ export default function Home() {
           </section>
         )}
 
-        {(view === "faltantes" || view === "compras") && (
+        {(view === "faltantes" ||
+          (view === "compras" && purchaseMode === "weekly")) && (
           <section>
             <div className="page-heading compact">
               <div>
@@ -2659,6 +3235,25 @@ export default function Home() {
                 {requirementState.loading ? "Calculando…" : "Recalcular"}
               </button>
             </div>
+            {view === "compras" && (
+              <nav className="purchase-mode-tabs" aria-label="Tipo de análisis de compras">
+                <button
+                  data-active={purchaseMode === "weekly"}
+                  onClick={() => setPurchaseMode("weekly")}
+                >
+                  Programa semanal
+                </button>
+                <button
+                  data-active={purchaseMode === "monthly"}
+                  onClick={() => {
+                    setPurchaseMode("monthly");
+                    void loadMonthlyPlan();
+                  }}
+                >
+                  Análisis mensual
+                </button>
+              </nav>
+            )}
             <div className="bom-kpis">
               <article>
                 <strong>{requirementState.mapped}</strong>
@@ -2666,13 +3261,14 @@ export default function Home() {
               </article>
               <article>
                 <strong>{requirementState.provisional}</strong>
-                <span>BOM provisionales del Sheet</span>
+                <span>fichas provisionales del Sheet</span>
               </article>
               <article data-warning={shortages.length > 0}>
                 <strong>{shortages.length}</strong>
                 <span>insumos a comprar</span>
               </article>
             </div>
+            {requirementState.completed>0&&<p className="bom-message">{requirementState.completed} operaciones ya realizadas fueron excluidas de faltantes y compras.</p>}
             {requirementState.error ? (
               <p className="bom-message consumption-error">
                 {requirementState.error}
@@ -2908,9 +3504,8 @@ export default function Home() {
                     <legend>Módulos habilitados</legend>
                     {[
                       ["programacion", "Programación"],
-                      ["mensual", "Plan mensual"],
                       ["productos", "Productos"],
-                      ["bom", "BOM"],
+                      ["bom", "Ficha técnica"],
                       ["consumos", "Consumos"],
                       ["stock", "Stock"],
                       ["faltantes", "Faltantes"],
@@ -3045,19 +3640,19 @@ export default function Home() {
               <div className="table-toolbar"><div><h2>Configuración operativa</h2><p>Solo el administrador puede modificar estos parámetros.</p></div><span className="row-status valid">Guardada en D1</span></div>
               <div className="admin-settings-form">
                 <label>ID de Google Sheets<input value={settingsDraft.spreadsheetId} onChange={event=>setSettingsDraft(current=>({...current,spreadsheetId:event.target.value}))}/><small>No se muestran ni modifican aquí las credenciales privadas de Google.</small></label>
-                <label>Sincronización automática (segundos)<input type="number" min="10" max="3600" value={settingsDraft.syncIntervalSeconds} onChange={event=>setSettingsDraft(current=>({...current,syncIntervalSeconds:Number(event.target.value)}))}/><small>Se recomienda 60 segundos para evitar el Error 1102 de Cloudflare.</small></label>
+                <label>Sincronización automática (segundos)<input type="number" min="10" max="3600" value={settingsDraft.syncIntervalSeconds} onChange={event=>setSettingsDraft(current=>({...current,syncIntervalSeconds:Number(event.target.value)}))}/><small>Valor recomendado: 30 segundos. Las solicitudes simultáneas comparten una sola actualización.</small></label>
                 <label>Caché compartida (segundos)<input type="number" min="0" max="300" value={settingsDraft.cacheSeconds} onChange={event=>setSettingsDraft(current=>({...current,cacheSeconds:Number(event.target.value)}))}/><small>Una sola lectura se reutiliza entre navegadores durante este período.</small></label>
                 <label>Depósitos incluidos<input value={settingsDraft.includedDepots.join(", ")} onChange={event=>setSettingsDraft(current=>({...current,includedDepots:event.target.value.split(",").map(value=>value.trim().toUpperCase()).filter(Boolean)}))}/><small>Separados por coma. 13 = Producción · C18 = Calidad · 2 = Depósito 2.</small></label>
               </div>
               <div className="settings-actions"><button className="primary-button" onClick={()=>void saveSettings()}>Guardar configuración</button>{settingsMessage&&<span>{settingsMessage}</span>}</div>
               <div className="admin-config-grid">
                 <section><span>Capacidad de importación</span><strong>Hasta 20.000 insumos</strong><small>La carga se realiza por lotes y verifica el total guardado.</small></section>
-                <section><span>Base de datos</span><strong>Cloudflare D1</strong><small>Usuarios, BOM, stock y distribución por depósito.</small></section>
+                <section><span>Base de datos</span><strong>Cloudflare D1</strong><small>Usuarios, fichas técnicas, stock y distribución por depósito.</small></section>
               </div>
               <div className="admin-protected-note"><strong>Protección de credenciales</strong><p>El correo de servicio y la clave privada de Google permanecen como secretos de Cloudflare. Desde aquí se modifican solamente los parámetros operativos seguros.</p></div>
             </article>}
             {adminTab==="diagnostico"&&<article className="table-card admin-system-card">
-              <div className="table-toolbar"><div><h2>Estado de la integración</h2><p>Información de la sesión actual.</p></div><button className="export-button" disabled={refreshing} onClick={()=>void refreshProgram(true)}>{refreshing?"Probando…":"Probar conexión"}</button></div>
+              <div className="table-toolbar"><div><h2>Estado de la integración</h2><p>Información de la sesión actual.</p></div><button className="export-button" disabled={refreshing} onClick={()=>void synchronizeProgram(true)}>{refreshing?"Probando…":"Probar conexión"}</button></div>
               <div className="admin-diagnostic-grid">
                 <section data-ok={sourceState.live}><span>Conexión</span><strong>{sourceState.live?"Sincronizado en vivo":"Instantánea validada"}</strong><small>{sourceState.notice}</small></section>
                 <section><span>Última lectura</span><strong>{new Intl.DateTimeFormat("es-AR",{dateStyle:"short",timeStyle:"medium"}).format(new Date(sourceState.fetchedAt))}</strong><small>Hora informada por la última respuesta válida.</small></section>
@@ -3080,7 +3675,7 @@ export default function Home() {
             <h1>Este módulo se habilitará después</h1>
             <p>
               Primero debemos validar completamente la lectura del programa.
-              Esto evita que BOM, stock y compras se construyan sobre datos
+              Esto evita que las fichas técnicas, el stock y las compras se construyan sobre datos
               interpretados de forma incorrecta.
             </p>
             <button
@@ -3105,23 +3700,31 @@ export default function Home() {
           <header>
             <div>
               <strong>Asistente de Insumos</strong>
-              <small>Respuestas con datos actuales del ERP</small>
+              <small>Ayuda general con el estado actual del ERP</small>
             </div>
             <button onClick={() => setChatOpen(false)}>×</button>
           </header>
           <div className="chat-quick">
-            <button onClick={() => askAssistant("¿Qué tengo que comprar?")}>
-              ¿Qué comprar?
+            <button disabled={chatLoading} onClick={() => void askAssistant("Dame un resumen de hoy")}>
+              Resumen de hoy
             </button>
             <button
-              onClick={() => askAssistant("¿Qué se produce esta semana?")}
+              disabled={chatLoading}
+              onClick={() => void askAssistant("¿Qué cambió en la programación?")}
             >
-              Producción semanal
+              ¿Qué cambió?
             </button>
             <button
-              onClick={() => askAssistant("¿Cuántos códigos tienen stock?")}
+              disabled={chatLoading}
+              onClick={() => void askAssistant("¿Cuál es el estado del sistema?")}
             >
-              Resumen de stock
+              Estado del sistema
+            </button>
+            <button
+              disabled={chatLoading}
+              onClick={() => void askAssistant("¿Cómo funciona la aplicación?")}
+            >
+              Cómo funciona
             </button>
           </div>
           <div className="chat-messages">
@@ -3134,15 +3737,16 @@ export default function Home() {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              askAssistant(chatInput);
+              void askAssistant(chatInput);
             }}
           >
             <input
               value={chatInput}
               onChange={(event) => setChatInput(event.target.value)}
-              placeholder="Escribí una pregunta o un código"
+              placeholder="Preguntá sobre el funcionamiento del ERP"
+              disabled={chatLoading}
             />
-            <button>Enviar</button>
+            <button disabled={chatLoading}>{chatLoading?"Pensando…":"Enviar"}</button>
           </form>
         </aside>
       )}

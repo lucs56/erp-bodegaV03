@@ -3,6 +3,11 @@ export type OperationAction = "FRACCIONAR" | "VESTIR" | "ENCAJONAR";
 
 export type ProgramRecord = {
   id: string;
+  /**
+   * Una fila tachada en Google Sheets representa un trabajo ya realizado.
+   * Se conserva para trazabilidad, pero no participa del cálculo de consumo.
+   */
+  completed?: boolean;
   weekId: string;
   weekLabel: string;
   weekStatus: WeekStatus;

@@ -10,7 +10,7 @@
     "dev": "node scripts/run-with-wrangler-log.mjs vite",
     "build": "bash scripts/build-verified.sh",
     "start": "node scripts/run-with-wrangler-log.mjs vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --test tests/program-parser.test.ts tests/program-diff.test.ts tests/requirements.test.ts tests/stock-import.test.ts tests/bom-suggestions.test.ts tests/monthly-planning.test.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --test tests/program-parser.test.ts tests/program-diff.test.ts tests/requirements.test.ts tests/stock-import.test.ts tests/bom-suggestions.test.ts tests/xlsx-strikethrough.test.ts tests/assistant.test.ts tests/monthly-purchases.test.ts",
     "validate:artifact": "bash scripts/validate-artifact.sh",
     "lint": "bash scripts/sites-env.sh -- eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "bash scripts/sites-env.sh -- drizzle-kit generate"
@@ -41,5 +41,5 @@
     "wrangler": "4.92.0"
   },
   "type": "module",
-  "displayName": "ERP de Insumos - Planificación Mensual"
+  "displayName": "ERP de Insumos para Bodega"
 }

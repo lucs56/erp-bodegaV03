@@ -16,5 +16,5 @@ export function diffProgram(previous: ProgramRecord[], next: ProgramRecord[]) {
 }
 
 function signature(record: ProgramRecord) {
-  return JSON.stringify([record.weekId, record.line, record.action, record.pin, record.productCode, record.brand, record.variety, record.vintage, record.bottles, record.client, record.country, record.materials]);
+  return JSON.stringify([record.weekId, record.line, record.action, record.pin, record.productCode, record.brand, record.variety, record.vintage, record.bottles, record.client, record.country, record.completed, record.materials]);
 }

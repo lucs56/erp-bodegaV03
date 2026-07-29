@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 import { parseProgramSheet, type ParsedWeek } from "./program-parser";
 import { readSettings } from "./app-settings";
 import { getD1Database } from "../db";
+import { struckRowsBySheet } from "./xlsx-strikethrough";
 
 const DEFAULT_SHEET_ID = "1XL44rx3sNKpxowAQzY1iSjy7s8lYOsPTMngD6xeBDPQ";
 const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
@@ -52,22 +53,91 @@ async function fetchLiveProgram(configuredSpreadsheetId:string): Promise<LivePro
     .sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
   if (tabs.length === 0) throw new Error("La planilla no contiene pestañas visibles.");
 
-  const batchUrl = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet`);
-  batchUrl.searchParams.set("majorDimension", "ROWS");
-  batchUrl.searchParams.set("valueRenderOption", "FORMATTED_VALUE");
+  const ranges: string[] = [];
   for (const tab of tabs) {
     const escapedTitle = String(tab.title).replace(/'/g, "''");
     const rowLimit = Math.min(tab.gridProperties?.rowCount ?? 1500, 5000);
-    batchUrl.searchParams.append("ranges", `'${escapedTitle}'!A1:Z${rowLimit}`);
+    ranges.push(`'${escapedTitle}'!A1:Z${rowLimit}`);
   }
-  const values = await googleJson<{ valueRanges?: Array<{ values?: unknown[][] }> }>(batchUrl, token);
-  const weeks = tabs
-    .map((tab, index) => parseProgramSheet({
-      sheetId: Number(tab.sheetId ?? 0),
-      title: String(tab.title),
-      values: values.valueRanges?.[index]?.values ?? [],
-    }))
-    .filter((week) => week.weekId !== "unknown");
+
+  let weeks: ParsedWeek[];
+  try {
+    const formattedUrl = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`);
+    formattedUrl.searchParams.set("includeGridData", "true");
+    formattedUrl.searchParams.set(
+      "fields",
+      "sheets(properties(sheetId,title),data(startRow,rowData(values(formattedValue,effectiveFormat(textFormat(strikethrough))))))",
+    );
+    for (const range of ranges) formattedUrl.searchParams.append("ranges", range);
+    const formatted = await googleJson<{
+      sheets?: Array<{
+        properties?: { sheetId?: number; title?: string };
+        data?: Array<{
+          startRow?: number;
+          rowData?: Array<{
+            values?: Array<{
+              formattedValue?: string;
+              effectiveFormat?: {
+                textFormat?: { strikethrough?: boolean };
+              };
+            }>;
+          }>;
+        }>;
+      }>;
+    }>(formattedUrl, token);
+    const formattedByTitle = new Map(
+      (formatted.sheets ?? []).map((sheet) => [
+        String(sheet.properties?.title ?? ""),
+        sheet,
+      ]),
+    );
+    weeks = tabs
+      .map((tab) => {
+        const sheet = formattedByTitle.get(String(tab.title));
+        const values: unknown[][] = [];
+        const struckRows = new Set<number>();
+        for (const grid of sheet?.data ?? []) {
+          const startRow = grid.startRow ?? 0;
+          for (const [rowIndex, row] of (grid.rowData ?? []).entries()) {
+            const cells = row.values ?? [];
+            values[startRow + rowIndex] = cells.map(
+              (cell) => cell.formattedValue ?? "",
+            );
+            if (
+              cells
+                .slice(0, 16)
+                .some(
+                  (cell) =>
+                    cell.effectiveFormat?.textFormat?.strikethrough === true,
+                )
+            )
+              struckRows.add(startRow + rowIndex + 1);
+          }
+        }
+        return parseProgramSheet({
+          sheetId: Number(tab.sheetId ?? 0),
+          title: String(tab.title),
+          values,
+          struckRows,
+        });
+      })
+      .filter((week) => week.weekId !== "unknown");
+  } catch {
+    // Si Google no permite leer formatos, se conserva la lectura de valores.
+    // La sincronización nunca debe quedar bloqueada por el estilo de las celdas.
+    const batchUrl = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet`);
+    batchUrl.searchParams.set("majorDimension", "ROWS");
+    batchUrl.searchParams.set("valueRenderOption", "FORMATTED_VALUE");
+    for (const range of ranges) batchUrl.searchParams.append("ranges", range);
+    const values = await googleJson<{ valueRanges?: Array<{ values?: unknown[][] }> }>(batchUrl, token);
+    weeks = tabs
+      .map((tab, index) => parseProgramSheet({
+        sheetId: Number(tab.sheetId ?? 0),
+        title: String(tab.title),
+        values: values.valueRanges?.[index]?.values ?? [],
+      }))
+      .filter((week) => week.weekId !== "unknown");
+  }
 
   return {
     spreadsheetId,
@@ -82,8 +152,9 @@ async function readPublicWorkbook(spreadsheetId:string):Promise<LiveProgram>{
   url.searchParams.set("format","xlsx");url.searchParams.set("_",Date.now().toString());
   const response=await fetch(url,{cache:"no-store",headers:{"cache-control":"no-cache, no-store",pragma:"no-cache"}});
   if(!response.ok)throw new Error(response.status===401||response.status===403?"Google Sheets no permite leer la programación. Compartila como lector mediante enlace.":`Google Sheets respondió ${response.status}.`);
-  const workbook=XLSX.read(await response.arrayBuffer(),{type:"array",cellDates:true});
-  const weeks=workbook.SheetNames.map((title,index)=>parseProgramSheet({sheetId:index+1,title,values:XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[title],{header:1,defval:"",raw:false})})).filter(week=>week.weekId!=="unknown");
+  const workbook=XLSX.read(await response.arrayBuffer(),{type:"array",cellDates:true,cellStyles:true,bookFiles:true});
+  const struckRows=struckRowsBySheet(workbook);
+  const weeks=workbook.SheetNames.map((title,index)=>parseProgramSheet({sheetId:index+1,title,values:XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[title],{header:1,defval:"",raw:false}),struckRows:struckRows.get(title)})).filter(week=>week.weekId!=="unknown");
   return{spreadsheetId,title:"Programación Junín",fetchedAt:new Date().toISOString(),weeks};
 }
 

@@ -18,9 +18,11 @@ export const stockDepotItems = sqliteTable("stock_depot_items", {
 export const appUsers = sqliteTable("app_users", {
   id: integer("id").primaryKey({ autoIncrement: true }), email: text("email").notNull(), username:text("username"),passwordHash:text("password_hash"),name: text("name").notNull(), role: text("role").notNull().default("planner"), active: integer("active",{mode:"boolean"}).notNull().default(true), permissions: text("permissions").notNull().default("programacion,productos,bom,consumos,stock,faltantes,compras"), updatedAt:text("updated_at").notNull(),
 },table=>[uniqueIndex("app_users_email_uq").on(table.email),uniqueIndex("app_users_username_uq").on(table.username)]);
-export const monthlyPlanRows = sqliteTable("monthly_plan_rows", {
-  id:text("id").primaryKey(),month:text("month").notNull(),productCode:text("product_code").notNull(),productName:text("product_name").notNull(),bottles:real("bottles").notNull(),unitsPerBox:integer("units_per_box").notNull(),notes:text("notes").notNull().default(""),updatedAt:text("updated_at").notNull(),
-});
-export const incomingMaterials = sqliteTable("incoming_materials", {
-  id:text("id").primaryKey(),expectedMonth:text("expected_month").notNull(),materialCode:text("material_code").notNull(),materialName:text("material_name").notNull(),quantity:real("quantity").notNull(),supplier:text("supplier").notNull().default(""),orderReference:text("order_reference").notNull().default(""),notes:text("notes").notNull().default(""),updatedAt:text("updated_at").notNull(),
+export const monthlyPurchasePlans = sqliteTable("monthly_purchase_plans", {
+  key: text("key").primaryKey(),
+  fileName: text("file_name").notNull(),
+  periodLabel: text("period_label").notNull(),
+  payload: text("payload").notNull(),
+  importedBy: text("imported_by").notNull(),
+  importedAt: text("imported_at").notNull(),
 });

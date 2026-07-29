@@ -74,26 +74,13 @@ async function ensureSchema(database: D1Database) {
         value TEXT NOT NULL,
         fetched_at TEXT NOT NULL
       )`,
-      `CREATE TABLE IF NOT EXISTS monthly_plan_rows (
-        id TEXT PRIMARY KEY NOT NULL,
-        month TEXT NOT NULL,
-        product_code TEXT NOT NULL,
-        product_name TEXT NOT NULL,
-        bottles REAL NOT NULL,
-        units_per_box INTEGER NOT NULL,
-        notes TEXT DEFAULT '' NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS incoming_materials (
-        id TEXT PRIMARY KEY NOT NULL,
-        expected_month TEXT NOT NULL,
-        material_code TEXT NOT NULL,
-        material_name TEXT NOT NULL,
-        quantity REAL NOT NULL,
-        supplier TEXT DEFAULT '' NOT NULL,
-        order_reference TEXT DEFAULT '' NOT NULL,
-        notes TEXT DEFAULT '' NOT NULL,
-        updated_at TEXT NOT NULL
+      `CREATE TABLE IF NOT EXISTS monthly_purchase_plans (
+        key TEXT PRIMARY KEY NOT NULL,
+        file_name TEXT NOT NULL,
+        period_label TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        imported_by TEXT NOT NULL,
+        imported_at TEXT NOT NULL
       )`,
     ];
 

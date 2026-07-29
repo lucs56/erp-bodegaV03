@@ -2,7 +2,7 @@ import "server-only";
 import { getD1Database } from "../db";
 
 export type OperationalSettings={spreadsheetId:string;syncIntervalSeconds:number;cacheSeconds:number;includedDepots:string[]};
-export const DEFAULT_SETTINGS:OperationalSettings={spreadsheetId:"1XL44rx3sNKpxowAQzY1iSjy7s8lYOsPTMngD6xeBDPQ",syncIntervalSeconds:60,cacheSeconds:60,includedDepots:["2","13","C18","R18","2OB"]};
+export const DEFAULT_SETTINGS:OperationalSettings={spreadsheetId:"1XL44rx3sNKpxowAQzY1iSjy7s8lYOsPTMngD6xeBDPQ",syncIntervalSeconds:30,cacheSeconds:15,includedDepots:["2","13","C18","R18","2OB"]};
 
 export function validateSettings(value:Partial<OperationalSettings>):OperationalSettings{
   const spreadsheetId=String(value.spreadsheetId??"").trim();
@@ -20,7 +20,13 @@ export async function readSettings():Promise<OperationalSettings>{
   try{
     const database=await getD1Database();
     const row=await database.prepare("SELECT value FROM app_settings WHERE key = ?").bind("operational").first<{value:string}>();
-    return row?.value?validateSettings({...DEFAULT_SETTINGS,...JSON.parse(row.value)}):DEFAULT_SETTINGS;
+    if(!row?.value)return DEFAULT_SETTINGS;
+    const stored=validateSettings({...DEFAULT_SETTINGS,...JSON.parse(row.value)});
+    // Migra el valor predeterminado anterior sin alterar configuraciones
+    // personalizadas. La lectura forzada sigue protegida por single-flight.
+    if(stored.syncIntervalSeconds===60&&stored.cacheSeconds===60)
+      return{...stored,syncIntervalSeconds:30,cacheSeconds:15};
+    return stored;
   }catch{return DEFAULT_SETTINGS;}
 }
 

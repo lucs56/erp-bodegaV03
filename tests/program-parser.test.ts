@@ -60,3 +60,19 @@ test("marca una fila productiva sin código para impedir una relación BOM incor
   assert.equal(parsed.diagnostics[0].code, "MISSING_PRODUCT_CODE");
   assert.equal(parsed.diagnostics[0].sourceRow, 4);
 });
+
+test("conserva una fila tachada pero la marca como realizada", () => {
+  const parsed = parseProgramSheet({
+    sheetId: 3,
+    title: "Sem 27-07 al 31-07",
+    values: [
+      ["Programa de Producción - Sem del 27 de Julio al 31 de Julio 2026"],
+      ["PROGRAMACION LINEA 1"],
+      headers,
+      row({ 2: "P1", 3: "ALAMOS", 4: "MALBEC", 11: "FRACCIONAR", 14: "600" }),
+    ],
+    struckRows: new Set([4]),
+  });
+  assert.equal(parsed.records.length, 1);
+  assert.equal(parsed.records[0].completed, true);
+});
