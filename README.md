@@ -1,59 +1,39 @@
 # ERP de Insumos para Bodega
 
-## Análisis mensual de compras
+## Entrega simplificada de compras
 
-Esta entrega conecta las tres fuentes que utiliza Compras:
+- Navegación operativa reducida a `Resumen`, `Programación`, `Stock`, `Análisis compras` y `Administración`.
+- `Análisis compras` admite los archivos ESTIMADO, STOCK, PENDIENTE y, cuando existe, ANALISIS.
+- El botón `Actualizar desde Sheets` toma las necesidades ya calculadas desde la programación vinculada, las cruza con el stock vigente y conserva los pendientes confirmados.
+- Los códigos `30354` y `30354A` se consolidan como un único insumo.
+- Fórmula aplicada: `Compra exacta = Necesidad confirmada - Stock - Pendiente confirmado`, con mínimo cero.
+- La compra recomendada se redondea siempre hacia arriba al próximo millar.
+- Si PENDIENTE incluye fecha prevista, entrega, arribo o ETA, el sistema descuenta automáticamente solo lo que llega dentro del período analizado. El valor confirmado puede corregirse antes de guardar.
+- El resultado se guarda en Cloudflare D1 para que todos los usuarios vean el mismo cálculo.
+- La exportación Excel reproduce exactamente las ocho columnas visibles de la tabla, en el mismo orden y sin columnas auxiliares.
+- Base D1 configurada: `erpcompras`.
 
-- `ESTIMADO`: productos previstos y necesidad de cada insumo.
-- `STOCK`: existencia actual y distribución por depósito.
-- `PENDIENTE`: órdenes emitidas que todavía deben recibirse.
-- `ANALISIS` (opcional): ajustes de necesidad y pendiente ya confirmados por
-  Compras.
+### Flujo operativo
 
-El módulo **Análisis compras** acepta un único Excel con esas hojas o varios
-archivos seleccionados juntos. Calcula por insumo:
+1. Revisar `Programación` y actualizar Google Sheets.
+2. Cargar o corregir el `Stock`.
+3. Abrir `Análisis compras`.
+4. Usar `Actualizar desde Sheets` para el programa vigente, o `Cargar archivos` para seleccionar juntos ESTIMADO, STOCK, PENDIENTE y ANALISIS.
+5. Confirmar necesidad y pendiente, guardar y exportar el Excel.
 
-```text
-saldo = stock + pendiente confirmado - necesidad confirmada
-compra exacta = máximo(0, -saldo)
-compra redondeada = compra exacta redondeada hacia arriba
-```
+Las únicas columnas exportadas son:
 
-El redondeo inicial es de 10.000 unidades y puede modificarse antes de guardar.
-Al usar **Guardar y sincronizar**, el análisis se comparte en Cloudflare D1 y
-el contenido de la hoja `STOCK` reemplaza la fotografía de existencias. De ese
-modo Stock, Faltantes semanales y Análisis de compras utilizan la misma
-información.
-
-Los códigos `30354` y `30354A` se consideran el mismo insumo:
-
-- el stock de ambos códigos se suma;
-- la necesidad se calcula una sola vez;
-- el resultado conserva ambos códigos como trazabilidad;
-- el código consolidado utilizado por la aplicación es `30354A`.
-
-La navegación conserva Programación, Productos, Ficha técnica, Consumos, Stock
-y Faltantes porque son las fuentes y controles que explican el resultado. El
-informe antiguo de compras semanales fue reemplazado: **Faltantes** controla las
-semanas vigentes y **Análisis compras** realiza la planificación mensual.
-
-### Base de datos configurada
-
-- Nombre: `erpcompras`
-- ID: `48598a0a-0415-46fd-8918-cfa1d0928a6b`
-- Binding: `DB`
-
-Las tablas se crean automáticamente durante el primer uso. El cálculo mensual
-se guarda en `app_settings` y queda disponible para todos los usuarios y
-dispositivos conectados a esta misma base.
+`INSUMO`, `NECESIDAD CALCULADA`, `NECESIDAD CONFIRMADA`, `STOCK`,
+`PENDIENTE DETECTADO`, `PENDIENTE CONFIRMADO`, `COMPRA EXACTA` y
+`COMPRA REDONDEADA`.
 
 ## Mejoras de esta entrega
 
 - Sincronización inmediata al iniciar sesión, actualización automática cada 30 segundos y botón manual.
 - Una sola lectura de Google Sheets compartida entre Programación y el motor de cálculo, con reintento controlado para evitar respuestas 503 y Error 1102.
 - El último programa y el último cálculo correcto permanecen visibles si Google o Cloudflare demoran.
-- Las filas tachadas en Google Sheets se muestran como `REALIZADO` y quedan excluidas de Consumos, Faltantes y Compras.
-- El módulo visible `BOM` pasa a llamarse `Ficha técnica`; las rutas y tablas internas se conservan para no perder información.
+- Las filas tachadas en Google Sheets se muestran como `REALIZADO` y quedan excluidas del cálculo de necesidades y compras.
+- Las fichas técnicas y el motor de consumo se conservan internamente para calcular los insumos, sin agregar secciones a la navegación simplificada.
 - Asistente general del ERP para explicar fecha, sincronización, cambios, estado y módulos. Funciona localmente y admite IA opcional mediante la API de OpenAI.
 
 ### IA opcional para el asistente

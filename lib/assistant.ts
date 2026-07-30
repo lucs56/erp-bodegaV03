@@ -45,27 +45,27 @@ export function generalAssistantFallback(
 
   if (/\b(ERROR|FALLA|PROBLEMA|ESTADO|ANDA|FUNCIONA)\b/.test(term))
     return context.blockedOperations
-      ? `El sistema conserva la última información válida. Hay ${context.blockedOperations} operaciones bloqueadas porque todavía no pueden relacionarse con una ficha técnica. Revisalas en Consumos o Ficha técnica.`
+      ? `El sistema conserva la última información válida. Hay ${context.blockedOperations} operaciones que todavía no pudieron incorporarse al cálculo interno. La programación y el último análisis guardado siguen disponibles.`
       : "Los módulos principales están operativos. Si Google o Cloudflare demoran, la aplicación conserva la última lectura y reintenta sin borrar el cálculo anterior.";
 
   if (/\b(COMPRA|FALTANTE|COMPRAR)\b/.test(term))
     return context.shortages
-      ? `Hay ${context.shortages} insumos con necesidad de compra. Abrí Faltantes para revisar el origen y Compras para descargarlos agrupados. Las operaciones tachadas como realizadas no están incluidas.`
-      : "Con el programa, las fichas técnicas y el stock cargados no hay faltantes calculados en este momento.";
+      ? `Hay ${context.shortages} insumos con compra sugerida. Abrí Análisis compras para revisar necesidad, stock, pendiente y exportar el Excel operativo.`
+      : "El último análisis guardado no tiene compras sugeridas.";
 
   if (/\b(STOCK|EXISTENCIA|DEPOSITO)\b/.test(term))
-    return `El último stock válido contiene ${context.stockItems} insumos. En Stock podés ver el total y su distribución por depósito; Faltantes usa ese total para el cálculo.`;
+    return `El último stock válido contiene ${context.stockItems} insumos. En Stock podés ver el total y su distribución por depósito; Análisis compras usa ese total para calcular la reposición.`;
 
   if (/\b(FICHA|TECNICA|MATERIAL)\b/.test(term))
-    return "Ficha técnica relaciona cada producto con sus botellas, cierres, cápsulas, cajas y etiquetas, indicando el consumo por botella o por caja. Es la base para calcular Consumos, Faltantes y Compras.";
+    return "Las fichas y el catálogo siguen formando parte del cálculo interno, pero la operación diaria se concentra en Programación, Stock y Análisis compras.";
 
   if (/\b(MODULO|COMO FUNCIONA|PARA QUE SIRVE|AYUDA|QUE HACE)\b/.test(term))
-    return "El flujo general es: Programación lee Google Sheets; Ficha técnica define los insumos de cada producto; Stock carga las existencias por depósito; Consumos calcula la demanda; Faltantes compara demanda contra stock; y Compras prepara lo pendiente.";
+    return "El ERP tiene cinco secciones: Resumen muestra el estado ejecutivo; Programación lee Google Sheets; Stock conserva existencias y depósitos; Análisis compras cruza necesidad, stock y pendientes; Administración gestiona usuarios y configuración.";
 
   if (/\b(PROGRAMA|PRODUCCION|OPERACION|SEMANA)\b/.test(term))
     return `La lectura actual contiene ${context.operations} operaciones en ${context.weeks} semanas. ${context.completedOperations} están marcadas como realizadas y se excluyen de consumos y compras.`;
 
-  return "Puedo responder consultas generales sobre el funcionamiento del ERP, la fecha, sincronización, cambios de programación, fichas técnicas, stock, faltantes y compras. Para consultar un insumo puntual, usá el buscador del módulo correspondiente.";
+  return "Puedo responder consultas generales sobre el funcionamiento del ERP, la fecha, sincronización, cambios de programación, stock y análisis de compras. Para consultar un insumo puntual, usá el buscador del módulo correspondiente.";
 }
 
 function normalize(value: string) {

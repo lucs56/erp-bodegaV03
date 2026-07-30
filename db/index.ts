@@ -60,7 +60,7 @@ async function ensureSchema(database: D1Database) {
         name TEXT NOT NULL,
         role TEXT DEFAULT 'planner' NOT NULL,
         active INTEGER DEFAULT 1 NOT NULL,
-        permissions TEXT DEFAULT 'programacion,productos,bom,consumos,stock,faltantes,compras' NOT NULL,
+        permissions TEXT DEFAULT 'resumen,programacion,stock,compras' NOT NULL,
         updated_at TEXT NOT NULL
       )`,
       "CREATE UNIQUE INDEX IF NOT EXISTS app_users_email_uq ON app_users (email)",
@@ -73,6 +73,13 @@ async function ensureSchema(database: D1Database) {
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL,
         fetched_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS purchase_analysis (
+        id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+        rows TEXT NOT NULL,
+        source_files TEXT NOT NULL,
+        period_label TEXT DEFAULT '' NOT NULL,
+        updated_at TEXT NOT NULL
       )`,
     ];
 

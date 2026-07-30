@@ -1,6 +1,5 @@
 import type { ProgramRecord } from "./program-data";
 import { suggestBomFromProgram } from "./bom-suggestions.ts";
-import { canonicalMaterialCode } from "./purchase-analysis.ts";
 
 export type BomDefinition = { productCode: string; items: Array<{ materialCode: string; materialName: string; category: string; quantity: number; unit: string; action: string; substitutes: string[] }> };
 export type MaterialRequirement = { materialCode: string; materialName: string; category: string; unit: string; total: number; substitutes: string[]; weeks: Array<{ weekId: string; weekLabel: string; quantity: number }>; products: Array<{ productCode: string; productName: string; quantity: number }> };
@@ -26,9 +25,8 @@ export function calculateRequirements(records: ProgramRecord[], boms: BomDefinit
     const bom = bomByProduct.get(record.productCode)!;
     for (const item of bom.items.filter((candidate) => candidate.action === record.action)) {
       const consumed = record.bottles * item.quantity;
-      const materialCode = canonicalMaterialCode(item.materialCode);
-      const key = `${materialCode}|${item.unit}`;
-      const current = requirements.get(key) ?? { materialCode, materialName: item.materialName, category: item.category, unit: item.unit, total: 0, substitutes: item.substitutes.map(canonicalMaterialCode), weeks: [], products: [] };
+      const key = `${item.materialCode}|${item.unit}`;
+      const current = requirements.get(key) ?? { materialCode: item.materialCode, materialName: item.materialName, category: item.category, unit: item.unit, total: 0, substitutes: item.substitutes, weeks: [], products: [] };
       current.total += consumed;
       const week = current.weeks.find((value) => value.weekId === record.weekId);
       if (week) week.quantity += consumed; else current.weeks.push({ weekId: record.weekId, weekLabel: record.weekLabel, quantity: consumed });

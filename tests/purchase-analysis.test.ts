@@ -1,83 +1,172 @@
-import assert from "node:assert/strict";
 import test from "node:test";
-
+import assert from "node:assert/strict";
 import {
-  buildPurchaseAnalysis,
-  type SheetMatrix,
+  PURCHASE_ANALYSIS_COLUMNS,
+  calculatePurchase,
+  canonicalMaterialCode,
+  parsePurchaseWorkbook,
+  purchaseAnalysisTableRows,
 } from "../lib/purchase-analysis.ts";
 
-function sheet(name: string, rows: unknown[][]): SheetMatrix {
-  return { name, fileName: "analisis-mensual.xlsx", rows };
-}
-
-test("conecta estimado, stock, pendiente y análisis sin duplicar códigos equivalentes", () => {
-  const snapshot = buildPurchaseAnalysis([
-    sheet("ESTIMADO", [
-      ["CÓDIGO", "VARIEDAD", "PRESENTACIÓN", "Agosto", "Septiembre"],
-      [],
-      [null, null, null, null, null, null, null, "total cajas", "total botellas", "botella", "tapon", "tapa", "capsulas", "cajas"],
-      ["2372-24", "DV CATENA CABERNET - MALBEC", 6, 50, 50, null, null, 100, 600, "10348", "20383", null, "30354", "72460-25"],
-    ]),
-    sheet("STOCK", [
-      ["Codigo de producto", "Descripcion", "2", "C18", "TOTAL"],
-      ["30354", "CAP DV CATENA MARRON", 120, 80, 200],
-      ["30354A", "CAP DV MARRON ECO CAP", 90, 110, 200],
-    ]),
-    sheet("PENDIENTE", [
-      ["Fecha OC", "Nro. OC", "Producto/C", "Descripcion Producto/C", "F.Entr.", "C.por D./E.", "Cant. OC."],
-      ["01/08/26", "150001", "30354", "CAP DV CATENA MARRON", "15/08/26", -500, 1_000],
-      ["02/08/26", "150002", "30354A", "CAP DV MARRON ECO CAP", "16/08/26", -600, 1_000],
-    ]),
-    sheet("ANALISIS", [
-      ["Codigo", "Descripcion", "Stock", "Pendiente", "Necesidad", "A comprar"],
-      ["30354A", "CAP DV MARRON ECO CAP", 200, 300, 600, -100],
-    ]),
+test("conserva exactamente las ocho columnas operativas", () => {
+  assert.deepEqual(PURCHASE_ANALYSIS_COLUMNS, [
+    "INSUMO",
+    "NECESIDAD CALCULADA",
+    "NECESIDAD CONFIRMADA",
+    "STOCK",
+    "PENDIENTE DETECTADO",
+    "PENDIENTE CONFIRMADO",
+    "COMPRA EXACTA",
+    "COMPRA REDONDEADA",
   ]);
-
-  const item = snapshot.items.find(
-    (candidate) => candidate.materialCode === "30354A",
-  );
-  assert.ok(item);
-  assert.deepEqual(item.sourceCodes, ["30354", "30354A"]);
-  assert.equal(item.stock, 400);
-  assert.deepEqual(item.depots, { "2": 210, C18: 190 });
-  assert.equal(item.calculatedNeed, 600);
-  assert.equal(item.confirmedNeed, 600);
-  assert.equal(item.pendingDetected, 1_100);
-  assert.equal(item.pendingConfirmed, 300);
-  assert.equal(item.shortageExact, 0);
-  assert.equal(snapshot.summary.aliasesConsolidated, 1);
-  assert.equal(snapshot.summary.materials, 4);
 });
 
-test("calcula la compra exacta y la redondea siempre hacia arriba", () => {
-  const snapshot = buildPurchaseAnalysis(
-    [
-      sheet("ESTIMADO", [
-        ["CÓDIGO", "VARIEDAD", "PRESENTACIÓN", "Agosto"],
-        [],
-        [null, null, null, null, null, null, null, "total cajas", "total botellas", "botella", "tapon", "tapa", "capsulas", "cajas"],
-        ["330-24", "ALAMOS MALBEC", 6, 100, null, null, null, 100, 600, "10248", "20376", null, "30217", "72456D"],
-      ]),
-      sheet("STOCK", [
-        ["Codigo de producto", "Descripcion", "2", "C18", "TOTAL"],
-        ["20376", "TAPON ALAMOS", 100, 50, 150],
-      ]),
-      sheet("PENDIENTE", [
-        ["Fecha OC", "Nro. OC", "Producto/C", "Descripcion Producto/C", "F.Entr.", "C.por D./E.", "Cant. OC."],
-        ["01/08/26", "150003", "20376", "TAPON ALAMOS", "15/08/26", -125, 500],
-      ]),
-    ],
-    { rounding: 100 },
-  );
+test("la exportación usa las mismas ocho columnas y ningún dato auxiliar", () => {
+  const rows = purchaseAnalysisTableRows([
+    {
+      materialCode: "20028",
+      materialName: "Tapón / cierre",
+      calculatedNeed: 4_205_337.064,
+      confirmedNeed: 4_350_000,
+      stock: 291_700,
+      pendingDetected: 1_852_750,
+      confirmedPending: 1_100_000,
+      exactPurchase: 2_958_300,
+      roundedPurchase: 2_959_000,
+    },
+  ]);
 
-  const item = snapshot.items.find(
-    (candidate) => candidate.materialCode === "20376",
-  );
-  assert.ok(item);
-  assert.equal(item.confirmedNeed, 600);
-  assert.equal(item.stock, 150);
-  assert.equal(item.pendingConfirmed, 125);
-  assert.equal(item.shortageExact, 325);
-  assert.equal(item.purchaseRounded, 400);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.length, 8);
+  assert.equal(rows[1]?.length, 8);
+  assert.equal(rows[1]?.[0], "20028 - Tapón / cierre");
+});
+
+test("redondea la compra hacia arriba por millar", () => {
+  assert.deepEqual(calculatePurchase(4_350_000, 291_700, 1_100_000), {
+    exactPurchase: 2_958_300,
+    roundedPurchase: 2_959_000,
+  });
+});
+
+test("consolida 30354 y 30354A como un único insumo", () => {
+  assert.equal(canonicalMaterialCode("30354"), "30354A");
+  assert.equal(canonicalMaterialCode("30354A"), "30354A");
+  assert.equal(canonicalMaterialCode("30354-30354A"), "30354A");
+});
+
+test("cruza necesidad, stock y pendiente sin duplicar el alias", () => {
+  const result = parsePurchaseWorkbook([
+    {
+      name: "ESTIMADO",
+      rows: [
+        {
+          "Código de insumo": "30354",
+          "Nombre del insumo": "Cápsula",
+          "Necesidad calculada": 2_353_474.2,
+        },
+      ],
+    },
+    {
+      name: "STOCK",
+      rows: [
+        {
+          Código: "30354A",
+          Descripción: "Cápsula",
+          Stock: 452_726,
+        },
+      ],
+    },
+    {
+      name: "PENDIENTE",
+      rows: [{ Insumo: "30354", Pendiente: 280_000 }],
+    },
+  ]);
+
+  assert.equal(result.rows.length, 1);
+  assert.deepEqual(result.rows[0], {
+    materialCode: "30354A",
+    materialName: "Cápsula",
+    calculatedNeed: 2_353_474.2,
+    confirmedNeed: 2_353_474.2,
+    stock: 452_726,
+    pendingDetected: 280_000,
+    confirmedPending: 280_000,
+    exactPurchase: 1_620_748.2,
+    roundedPurchase: 1_621_000,
+  });
+});
+
+test("conserva el desglose por depósito aunque exista stock total", () => {
+  const result = parsePurchaseWorkbook([
+    {
+      name: "ESTIMADO",
+      rows: [
+        {
+          Insumo: "20028",
+          Descripción: "Tapón",
+          Necesidad: 500_000,
+        },
+      ],
+    },
+    {
+      name: "STOCK",
+      rows: [
+        {
+          Insumo: "20028",
+          Descripción: "Tapón",
+          Stock: 291_700,
+          "Depósito 2": 141_750,
+          C18: 149_950,
+        },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(result.stockItems[0]?.depots, {
+    "2": 141_750,
+    C18: 149_950,
+  });
+  assert.equal(result.rows[0]?.stock, 291_700);
+});
+
+test("solo descuenta pendientes que llegan dentro del período analizado", () => {
+  const result = parsePurchaseWorkbook([
+    {
+      name: "ESTIMADO SEPTIEMBRE-NOVIEMBRE 2026",
+      rows: [
+        {
+          Insumo: "10348",
+          Descripción: "Botella",
+          Necesidad: 500_000,
+        },
+      ],
+    },
+    {
+      name: "STOCK",
+      rows: [{ Insumo: "10348", Descripción: "Botella", Stock: 100_000 }],
+    },
+    {
+      name: "PENDIENTE",
+      rows: [
+        {
+          Insumo: "10348",
+          Descripción: "Botella",
+          Pendiente: 200_000,
+          "Fecha entrega": "15/10/2026",
+        },
+        {
+          Insumo: "10348",
+          Descripción: "Botella",
+          Pendiente: 100_000,
+          "Fecha entrega": "15/12/2026",
+        },
+      ],
+    },
+  ]);
+
+  assert.equal(result.rows[0]?.pendingDetected, 300_000);
+  assert.equal(result.rows[0]?.confirmedPending, 200_000);
+  assert.equal(result.rows[0]?.exactPurchase, 200_000);
+  assert.match(result.diagnostics.join(" "), /posteriores al período/);
 });

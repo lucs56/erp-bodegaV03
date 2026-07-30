@@ -13,10 +13,15 @@ import {
   type GeneralAssistantContext,
 } from "../lib/assistant";
 import {
-  buildPurchaseAnalysis,
-  recalculatePurchaseSnapshot,
+  PURCHASE_ANALYSIS_COLUMNS,
+  canonicalMaterialCode,
+  mergeSavedConfirmations,
+  parsePurchaseWorkbook,
+  purchaseAnalysisTableRows,
+  recalculatePurchaseRow,
+  type PurchaseAnalysisRow,
   type PurchaseAnalysisSnapshot,
-  type SheetMatrix,
+  type PurchaseWorkbookSheet,
 } from "../lib/purchase-analysis";
 
 type View =
@@ -30,6 +35,13 @@ type View =
   | "compras"
   | "usuarios"
   | "pendiente";
+const OPERATIONAL_NAV = [
+  ["resumen", "Resumen"],
+  ["programacion", "Programación"],
+  ["stock", "Stock"],
+  ["compras", "Análisis compras"],
+  ["usuarios", "Administración"],
+] as const;
 type BomItem = {
   materialCode: string;
   materialName: string;
@@ -125,6 +137,12 @@ function lineLabel(line: string) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("es-AR").format(value);
+}
+
+function formatPurchaseNumber(value: number) {
+  return new Intl.NumberFormat("es-AR", {
+    maximumFractionDigits: 3,
+  }).format(value);
 }
 
 function depotLabel(depot:string){
@@ -332,7 +350,6 @@ export default function Home() {
     unit: "unidad",
   });
   const stockFileRef = useRef<HTMLInputElement>(null);
-  const purchaseFileRef = useRef<HTMLInputElement>(null);
   const [stockImport, setStockImport] = useState<{
     fileName: string;
     items: StockImportItem[];
@@ -350,16 +367,14 @@ export default function Home() {
     includedRows: 0,
     excludedRows: 0,
   });
-  const [purchaseAnalysis, setPurchaseAnalysis] =
-    useState<PurchaseAnalysisSnapshot | null>(null);
-  const [purchaseImport, setPurchaseImport] = useState({
-    loading: false,
-    saving: false,
-    message: "",
-    error: "",
-  });
+  const purchaseFilesRef = useRef<HTMLInputElement>(null);
+  const [purchaseRows, setPurchaseRows] = useState<PurchaseAnalysisRow[]>([]);
+  const [purchaseSourceFiles, setPurchaseSourceFiles] = useState<string[]>([]);
+  const [purchasePeriod, setPurchasePeriod] = useState("");
+  const [purchaseUpdatedAt, setPurchaseUpdatedAt] = useState("");
   const [purchaseQuery, setPurchaseQuery] = useState("");
-  const [showOnlyPurchases, setShowOnlyPurchases] = useState(true);
+  const [purchaseLoading, setPurchaseLoading] = useState(false);
+  const [purchaseMessage, setPurchaseMessage] = useState("");
   const [users, setUsers] = useState<
     Array<{
       id: number;
@@ -380,8 +395,7 @@ export default function Home() {
     name: "",
     role: "planner",
     active: true,
-    permissions:
-      "resumen,programacion,productos,consumos,stock,faltantes,compras",
+    permissions: "resumen,programacion,stock,compras",
   });
   const [userMessage, setUserMessage] = useState("");
   const [userQuery, setUserQuery] = useState("");
@@ -581,16 +595,45 @@ export default function Home() {
         )
       : shortages;
   }, [shortages, shortageQuery]);
-  const visiblePurchaseAnalysis = useMemo(() => {
+  const visiblePurchaseRows = useMemo(() => {
     const term = purchaseQuery.trim().toLocaleLowerCase("es");
-    return (purchaseAnalysis?.items ?? []).filter((item) => {
-      if (showOnlyPurchases && item.shortageExact <= 0) return false;
-      if (!term) return item.confirmedNeed > 0 || item.shortageExact > 0;
-      return `${item.materialCode} ${item.sourceCodes.join(" ")} ${item.materialName} ${item.category} ${item.products.map((product) => `${product.productCode} ${product.productName}`).join(" ")}`
-        .toLocaleLowerCase("es")
-        .includes(term);
-    });
-  }, [purchaseAnalysis, purchaseQuery, showOnlyPurchases]);
+    return term
+      ? purchaseRows.filter((item) =>
+          `${item.materialCode} ${item.materialName}`
+            .toLocaleLowerCase("es")
+            .includes(term),
+        )
+      : purchaseRows;
+  }, [purchaseRows, purchaseQuery]);
+  const purchaseSummary = useMemo(
+    () => ({
+      materials: purchaseRows.length,
+      toBuy: purchaseRows.filter((item) => item.roundedPurchase > 0).length,
+      roundedTotal: purchaseRows.reduce(
+        (total, item) => total + item.roundedPurchase,
+        0,
+      ),
+      criticalStock: purchaseRows.filter(
+        (item) => item.confirmedNeed > 0 && item.stock <= 0,
+      ).length,
+    }),
+    [purchaseRows],
+  );
+  const purchaseGroups = useMemo(() => {
+    const groups = new Map<string, typeof visibleShortages>();
+    for (const item of visibleShortages)
+      groups.set(item.category || "Otros", [
+        ...(groups.get(item.category || "Otros") ?? []),
+        item,
+      ]);
+    return [...groups.entries()]
+      .map(([category, items]) => ({
+        category,
+        items,
+        total: items.reduce((sum, item) => sum + item.shortage, 0),
+      }))
+      .sort((left, right) => left.category.localeCompare(right.category, "es"));
+  }, [visibleShortages]);
   const visibleUsers = useMemo(() => {
     const term = userQuery.trim().toLocaleLowerCase("es");
     return term
@@ -825,38 +868,74 @@ export default function Home() {
       const response = await fetch("/api/purchase-analysis", {
         cache: "no-store",
       });
-      const payload = await responseJson<{
-        analysis?: PurchaseAnalysisSnapshot | null;
-        error?: string;
-      }>(response);
-      if (!response.ok) {
-        throw new Error(payload.error || "No se pudo leer el análisis.");
-      }
-      setPurchaseAnalysis(payload.analysis ?? null);
+      const payload = await responseJson<
+        PurchaseAnalysisSnapshot & { error?: string }
+      >(response);
+      if (!response.ok)
+        throw new Error(
+          payload.error || "No se pudo leer el análisis de compras.",
+        );
+      setPurchaseRows(payload.rows ?? []);
+      setPurchaseSourceFiles(payload.sourceFiles ?? []);
+      setPurchasePeriod(payload.periodLabel ?? "");
+      setPurchaseUpdatedAt(payload.updatedAt ?? "");
+      setPurchaseMessage("");
     } catch (error) {
-      setPurchaseImport((current) => ({
-        ...current,
-        error:
-          error instanceof Error
-            ? error.message
-            : "No se pudo leer el análisis de compras.",
-      }));
+      setPurchaseMessage(
+        error instanceof Error
+          ? error.message
+          : "No se pudo leer el análisis de compras.",
+      );
     }
   }, []);
-
-  const selectPurchaseFiles = async (fileList?: FileList | null) => {
-    const files = [...(fileList ?? [])];
-    if (!files.length) return;
-    setPurchaseImport({
-      loading: true,
-      saving: false,
-      message: "Leyendo ESTIMADO, STOCK y PENDIENTE…",
-      error: "",
-    });
+  const savePurchaseAnalysis = async (
+    rows = purchaseRows,
+    sourceFiles = purchaseSourceFiles,
+    periodLabel = purchasePeriod,
+  ) => {
+    setPurchaseLoading(true);
+    setPurchaseMessage("Guardando análisis compartido…");
+    try {
+      const response = await fetch("/api/purchase-analysis", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rows, sourceFiles, periodLabel }),
+      });
+      const payload = await responseJson<
+        PurchaseAnalysisSnapshot & { error?: string }
+      >(response);
+      if (!response.ok)
+        throw new Error(
+          payload.error || "No se pudo guardar el análisis de compras.",
+        );
+      setPurchaseRows(payload.rows ?? []);
+      setPurchaseSourceFiles(payload.sourceFiles ?? []);
+      setPurchasePeriod(payload.periodLabel ?? "");
+      setPurchaseUpdatedAt(payload.updatedAt ?? "");
+      setPurchaseMessage(
+        "Análisis guardado y disponible para todos los usuarios.",
+      );
+      return payload;
+    } catch (error) {
+      setPurchaseMessage(
+        error instanceof Error
+          ? error.message
+          : "No se pudo guardar el análisis de compras.",
+      );
+      return null;
+    } finally {
+      setPurchaseLoading(false);
+    }
+  };
+  const selectPurchaseFiles = async (files: FileList | File[]) => {
+    const selectedFiles = Array.from(files);
+    if (!selectedFiles.length) return;
+    setPurchaseLoading(true);
+    setPurchaseMessage("Leyendo ESTIMADO, STOCK, PENDIENTE y ANALISIS…");
     try {
       const XLSX = await import("xlsx");
-      const sheets: SheetMatrix[] = [];
-      for (const file of files) {
+      const sheets: PurchaseWorkbookSheet[] = [];
+      for (const file of selectedFiles) {
         const workbook = XLSX.read(await file.arrayBuffer(), {
           type: "array",
           cellDates: true,
@@ -866,240 +945,261 @@ export default function Home() {
           if (!sheet) continue;
           sheets.push({
             name,
-            fileName: file.name,
-            rows: XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-              header: 1,
-              defval: null,
+            rows: XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+              defval: "",
               raw: true,
             }),
           });
         }
       }
-      const analysis = buildPurchaseAnalysis(sheets);
-      const missing = [
-        !analysis.sheets.estimated && "ESTIMADO",
-        !analysis.sheets.stock && "STOCK",
-        !analysis.sheets.pending && "PENDIENTE",
-      ].filter(Boolean);
-      if (missing.length) {
+      const parsed = parsePurchaseWorkbook(sheets, stock);
+      if (!parsed.rows.length)
         throw new Error(
-          `Faltan las hojas obligatorias: ${missing.join(", ")}.`,
+          parsed.diagnostics[0] ||
+            "No se encontraron insumos para analizar en los archivos.",
         );
+      const includesAnalysis = sheets.some((sheet) =>
+        sheet.name
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLocaleLowerCase("es")
+          .includes("analisis"),
+      );
+      const rows =
+        purchaseRows.length && !includesAnalysis
+          ? mergeSavedConfirmations(parsed.rows, purchaseRows)
+          : parsed.rows;
+      const sourceFiles = selectedFiles.map((file) => file.name);
+      setPurchaseRows(rows);
+      setPurchaseSourceFiles(sourceFiles);
+      setPurchasePeriod(parsed.periodLabel);
+
+      if (parsed.stockItems.length) {
+        const stockResponse = await fetch("/api/stock/bulk", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ items: parsed.stockItems }),
+        });
+        const stockPayload = await responseJson<{ error?: string }>(
+          stockResponse,
+        );
+        if (!stockResponse.ok)
+          throw new Error(
+            stockPayload.error ||
+              "El análisis se leyó, pero no se pudo sincronizar el stock.",
+          );
+        await loadStock();
       }
-      setPurchaseAnalysis(analysis);
-      setPurchaseImport({
-        loading: false,
-        saving: false,
-        message: `${analysis.summary.products} productos y ${analysis.items.filter((item) => item.confirmedNeed > 0).length} insumos analizados. Revisá los ajustes y guardá el cálculo.`,
-        error: "",
-      });
+
+      const saved = await savePurchaseAnalysis(
+        rows,
+        sourceFiles,
+        parsed.periodLabel,
+      );
+      if (saved)
+        setPurchaseMessage(
+          `${rows.length} insumos analizados. ${parsed.stockItems.length ? "Stock sincronizado. " : ""}${parsed.diagnostics.join(" ")}`.trim(),
+        );
     } catch (error) {
-      setPurchaseImport({
-        loading: false,
-        saving: false,
-        message: "",
-        error:
-          error instanceof Error
-            ? error.message
-            : "No se pudieron interpretar los archivos.",
-      });
+      setPurchaseMessage(
+        error instanceof Error
+          ? error.message
+          : "No se pudieron procesar los archivos.",
+      );
     } finally {
-      if (purchaseFileRef.current) purchaseFileRef.current.value = "";
+      setPurchaseLoading(false);
+      if (purchaseFilesRef.current) purchaseFilesRef.current.value = "";
     }
   };
-
-  const updatePurchaseAmount = (
+  const updatePurchaseConfirmation = (
     materialCode: string,
-    field: "pendingConfirmed" | "confirmedNeed",
+    field: "confirmedNeed" | "confirmedPending",
     value: number,
   ) => {
-    setPurchaseAnalysis((current) => {
-      if (!current) return current;
-      return recalculatePurchaseSnapshot({
-        ...current,
-        items: current.items.map((item) =>
-          item.materialCode === materialCode
-            ? {
-                ...item,
-                [field]: Math.max(0, Number.isFinite(value) ? value : 0),
-                adjustmentSource: "manual" as const,
-              }
-            : item,
-        ),
-      });
-    });
-  };
-
-  const updatePurchaseRounding = (value: number) => {
-    setPurchaseAnalysis((current) =>
-      current
-        ? recalculatePurchaseSnapshot({
-            ...current,
-            rounding: Math.max(1, Math.round(value || 1)),
-          })
-        : current,
+    setPurchaseRows((current) =>
+      current.map((row) =>
+        row.materialCode === materialCode
+          ? recalculatePurchaseRow({
+              ...row,
+              [field]: Number.isFinite(value) ? Math.max(0, value) : 0,
+            })
+          : row,
+      ),
+    );
+    setPurchaseMessage(
+      "Hay cambios sin guardar. Presioná Guardar confirmaciones.",
     );
   };
-
-  const savePurchaseAnalysis = async () => {
-    if (!purchaseAnalysis || purchaseImport.saving) return;
-    setPurchaseImport((current) => ({
-      ...current,
-      saving: true,
-      message: "Guardando análisis y sincronizando el stock…",
-      error: "",
-    }));
+  const syncPurchaseAnalysisFromSheets = async () => {
+    if (!requirements.length) {
+      setPurchaseMessage(
+        "Todavía no hay necesidades calculadas. Actualizá Programación y volvé a intentarlo.",
+      );
+      return;
+    }
+    setPurchaseLoading(true);
+    setPurchaseMessage(
+      "Cruzando la programación de Google Sheets con el stock y los pendientes…",
+    );
     try {
-      const analysisResponse = await fetch("/api/purchase-analysis", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(purchaseAnalysis),
+      const previous = new Map(
+        purchaseRows.map((row) => [
+          canonicalMaterialCode(row.materialCode),
+          row,
+        ]),
+      );
+      const parsed = parsePurchaseWorkbook(
+        [
+          {
+            name: `ESTIMADO ${weeks.map((week) => week.label).join(" · ")}`,
+            rows: requirements.map((item) => ({
+              "Código de insumo": item.materialCode,
+              "Nombre del insumo": item.materialName,
+              "Necesidad calculada": item.total,
+            })),
+          },
+        ],
+        stock,
+      );
+      const rows = parsed.rows.map((row) => {
+        const saved = previous.get(canonicalMaterialCode(row.materialCode));
+        return recalculatePurchaseRow({
+          ...row,
+          confirmedNeed: row.calculatedNeed,
+          pendingDetected: saved?.pendingDetected ?? 0,
+          confirmedPending:
+            saved?.confirmedPending ?? saved?.pendingDetected ?? 0,
+        });
       });
-      const analysisPayload = await responseJson<{
-        analysis?: PurchaseAnalysisSnapshot;
-        error?: string;
-      }>(analysisResponse);
-      if (!analysisResponse.ok || !analysisPayload.analysis) {
-        throw new Error(
-          analysisPayload.error || "No se pudo guardar el análisis.",
+      const sourceFiles = [
+        "Google Sheets · Programación Junín",
+        ...purchaseSourceFiles.filter((name) =>
+          /pendient|stock|analisis/i.test(
+            name
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, ""),
+          ),
+        ),
+      ];
+      const periodLabel = weeks.map((week) => week.label).join(" · ");
+      const saved = await savePurchaseAnalysis(
+        rows,
+        [...new Set(sourceFiles)],
+        periodLabel,
+      );
+      if (saved)
+        setPurchaseMessage(
+          `${rows.length} insumos actualizados desde Google Sheets y cruzados con el stock vigente.`,
         );
-      }
-      const stockItems = analysisPayload.analysis.items
-        .filter(
-          (item) => item.stock > 0 || Object.keys(item.depots).length > 0,
-        )
-        .map((item) => ({
-          materialCode: item.materialCode,
-          materialName: item.materialName || item.materialCode,
-          category: item.category || "Otros",
-          quantity: item.stock,
-          unit: "unidad",
-          depots: item.depots,
-        }));
-      const stockResponse = await fetch("/api/stock/bulk", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ items: stockItems }),
-      });
-      const stockPayload = await responseJson<{
-        imported?: number;
-        error?: string;
-      }>(stockResponse);
-      if (!stockResponse.ok) {
-        throw new Error(
-          stockPayload.error ||
-            "El análisis se guardó, pero no se pudo sincronizar el stock.",
-        );
-      }
-      setPurchaseAnalysis(analysisPayload.analysis);
-      await Promise.all([loadStock(), loadRequirements()]);
-      setPurchaseImport({
-        loading: false,
-        saving: false,
-        message: `Análisis guardado para todos los usuarios y ${stockPayload.imported ?? stockItems.length} existencias sincronizadas.`,
-        error: "",
-      });
-    } catch (error) {
-      setPurchaseImport((current) => ({
-        ...current,
-        saving: false,
-        message: "",
-        error:
-          error instanceof Error
-            ? error.message
-            : "No se pudo guardar el análisis.",
-      }));
+    } finally {
+      setPurchaseLoading(false);
     }
   };
-
-  const exportPurchases = async () => {
-    if (!purchaseAnalysis) return;
+  const exportPurchaseAnalysis = async () => {
+    if (!purchaseRows.length) return;
     const XLSX = await import("xlsx");
-    const workbook = XLSX.utils.book_new();
-    const rows = purchaseAnalysis.items
-      .filter((item) => item.confirmedNeed > 0 || item.shortageExact > 0)
-      .map((item) => ({
-        Código: item.materialCode,
-        "Códigos consolidados": item.sourceCodes.join(" + "),
-        Descripción: item.materialName,
-        Tipo: item.category,
-        "Necesidad calculada": item.calculatedNeed,
-        "Necesidad confirmada": item.confirmedNeed,
-        Stock: item.stock,
-        "Stock por depósito": Object.entries(item.depots)
-          .map(
-            ([depot, quantity]) =>
-              `${depotLabel(depot)}: ${formatNumber(quantity)}`,
-          )
-          .join(" · "),
-        "Pendiente detectado": item.pendingDetected,
-        "Pendiente confirmado": item.pendingConfirmed,
-        Saldo: item.balance,
-        "Compra exacta": item.shortageExact,
-        "Compra redondeada": item.purchaseRounded,
-        "Productos que lo consumen": item.products
-          .map(
-            (product) =>
-              `${product.productCode} - ${product.productName} (${formatNumber(product.quantity)})`,
-          )
-          .join("; "),
-        Observaciones: item.notes.join(" "),
-      }));
-    const analysisSheet = XLSX.utils.json_to_sheet(rows);
-    analysisSheet["!cols"] = [
-      { wch: 16 },
-      { wch: 24 },
+    const data = purchaseAnalysisTableRows(purchaseRows);
+    const sheet = XLSX.utils.aoa_to_sheet(data);
+    sheet["!cols"] = [
       { wch: 42 },
-      { wch: 18 },
-      { wch: 20 },
-      { wch: 20 },
+      { wch: 22 },
+      { wch: 23 },
       { wch: 16 },
-      { wch: 40 },
-      { wch: 20 },
-      { wch: 20 },
-      { wch: 16 },
+      { wch: 21 },
+      { wch: 22 },
       { wch: 18 },
-      { wch: 20 },
-      { wch: 80 },
-      { wch: 70 },
+      { wch: 21 },
     ];
-    if (analysisSheet["!ref"]) {
-      analysisSheet["!autofilter"] = { ref: analysisSheet["!ref"] };
-    }
-    XLSX.utils.book_append_sheet(workbook, analysisSheet, "Análisis de compras");
-    const controlSheet = XLSX.utils.json_to_sheet([
-      { Control: "Período", Valor: purchaseAnalysis.period },
-      {
-        Control: "Archivos",
-        Valor: purchaseAnalysis.files.join(", "),
-      },
-      {
-        Control: "Fecha de cálculo",
-        Valor: purchaseAnalysis.updatedAt,
-      },
-      {
-        Control: "Redondeo",
-        Valor: purchaseAnalysis.rounding,
-      },
-      {
-        Control: "Faltante exacto total",
-        Valor: purchaseAnalysis.summary.shortageExact,
-      },
-      {
-        Control: "Compra redondeada total",
-        Valor: purchaseAnalysis.summary.purchaseRounded,
-      },
-      ...purchaseAnalysis.warnings.map((warning) => ({
-        Control: "Advertencia",
-        Valor: warning,
-      })),
-    ]);
-    controlSheet["!cols"] = [{ wch: 28 }, { wch: 100 }];
-    XLSX.utils.book_append_sheet(workbook, controlSheet, "Control");
+    if (sheet["!ref"]) sheet["!autofilter"] = { ref: sheet["!ref"] };
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "Análisis compras");
     XLSX.writeFile(
       workbook,
       `analisis-compras-${new Date().toISOString().slice(0, 10)}.xlsx`,
     );
+  };
+  const exportPurchases = async () => {
+    if (!shortages.length) return;
+    const XLSX = await import("xlsx");
+    const workbook = XLSX.utils.book_new();
+    const makeRows = (items: ShortageRequirement[]) =>
+      [...items]
+        .sort(
+          (left, right) =>
+            left.category.localeCompare(right.category, "es") ||
+            left.materialCode.localeCompare(right.materialCode, "es"),
+        )
+        .map((item) => ({
+          "Tipo de insumo": item.category || "Otros",
+          Código: item.materialCode,
+          Descripción: item.materialName,
+          Unidad: item.unit,
+          Necesidad: item.total,
+          Disponible: item.available,
+          "Cantidad a comprar": item.shortage,
+          "Stock por depósito":Object.entries(item.depots??{}).map(([depot,quantity])=>`${depotLabel(depot)}: ${formatNumber(quantity)}`).join(" · "),
+          "Semana del faltante": firstShortageWeek(item),
+          "Semanas con consumo": item.weeks
+            .map((week) => week.weekLabel)
+            .join(", "),
+          "Cantidad de productos": item.products.length,
+          "Productos que lo consumen": item.products
+            .map(
+              (product) =>
+                `${product.productCode} - ${product.productName} (${formatNumber(product.quantity)})`,
+            )
+            .join("; "),
+          Sustitutos: item.substitutes.join(", "),
+        }));
+    const addSheet = (name: string, items: ShortageRequirement[]) => {
+      const sheet = XLSX.utils.json_to_sheet(makeRows(items));
+      sheet["!cols"] = [
+        { wch: 20 },
+        { wch: 14 },
+        { wch: 34 },
+        { wch: 12 },
+        { wch: 15 },
+        { wch: 15 },
+        { wch: 20 },
+        { wch: 22 },
+        { wch: 35 },
+        { wch: 22 },
+        { wch: 70 },
+        { wch: 28 },
+      ];
+      if (sheet["!ref"]) sheet["!autofilter"] = { ref: sheet["!ref"] };
+      XLSX.utils.book_append_sheet(workbook, sheet, name);
+    };
+
+    addSheet("Todos los insumos", shortages);
+    const usedNames = new Set(["Todos los insumos"]);
+    for (const group of purchaseGroups) {
+      const base = (group.category || "Otros")
+        .replace(/[\\/?*:[\]]/g, " ")
+        .trim()
+        .slice(0, 31) || "Otros";
+      let name = base;
+      let suffix = 2;
+      while (usedNames.has(name)) {
+        const ending = ` ${suffix++}`;
+        name = `${base.slice(0, 31 - ending.length)}${ending}`;
+      }
+      usedNames.add(name);
+      const categoryItems = shortages.filter(
+        (item) => (item.category || "Otros") === group.category,
+      );
+      addSheet(name, categoryItems);
+    }
+    const date = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(workbook, `reporte-compras-${date}.xlsx`);
+  };
+  const exportPurchaseCategory=async(category:string,items:ShortageRequirement[])=>{
+    const XLSX=await import("xlsx");
+    const rows=[...items].sort((a,b)=>a.materialName.localeCompare(b.materialName,"es")).map(item=>({"Código de insumo":item.materialCode,"Nombre del insumo":item.materialName,"Tipo":item.category,"Unidad":item.unit,"Necesidad total":item.total,"Stock disponible":item.available,"Stock por depósito":Object.entries(item.depots??{}).map(([depot,quantity])=>`${depotLabel(depot)}: ${formatNumber(quantity)}`).join(" · "),"Cantidad a comprar":item.shortage,"Semana del faltante":firstShortageWeek(item),"Semanas con consumo":item.weeks.map(week=>week.weekLabel).join(", "),"Productos que lo consumen":item.products.map(product=>`${product.productCode} - ${product.productName} (${formatNumber(product.quantity)})`).join("; "),"Sustitutos":item.substitutes.join(", ")}));
+    const sheet=XLSX.utils.json_to_sheet(rows);sheet["!cols"]=[{wch:18},{wch:42},{wch:20},{wch:12},{wch:18},{wch:18},{wch:28},{wch:20},{wch:24},{wch:35},{wch:75},{wch:30}];if(sheet["!ref"])sheet["!autofilter"]={ref:sheet["!ref"]};
+    const workbook=XLSX.utils.book_new();XLSX.utils.book_append_sheet(workbook,sheet,category.replace(/[\/?*:[\]]/g," ").slice(0,31)||"Compras");
+    const safe=category.normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-zA-Z0-9_-]+/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"").slice(0,80)||"insumos";
+    XLSX.writeFile(workbook,`reporte-compras-${safe}-${new Date().toISOString().slice(0,10)}.xlsx`);
   };
   const emptyUserDraft = () => ({
     id: 0,
@@ -1109,8 +1209,7 @@ export default function Home() {
     name: "",
     role: "planner",
     active: true,
-    permissions:
-      "resumen,programacion,productos,consumos,stock,faltantes,compras",
+    permissions: "resumen,programacion,stock,compras",
   });
   const loadUsers = useCallback(async () => {
     const r = await fetch("/api/users", { cache: "no-store" });
@@ -1342,7 +1441,7 @@ export default function Home() {
       completedOperations:records.filter(record=>record.completed).length,
       mappedOperations:requirementState.mapped,
       blockedOperations:requirementState.blocked,
-      shortages:shortages.length,
+      shortages:purchaseSummary.toBuy,
       stockItems:stock.length,
       changes:{
         added:programChange.added,
@@ -1372,22 +1471,15 @@ export default function Home() {
       [
         "resumen",
         "programacion",
-        "productos",
-        "bom",
-        "consumos",
         "stock",
-        "faltantes",
         "compras",
         "usuarios",
       ].includes(target)
     ) {
       setView(target as View);
-      if (target === "bom") void loadBoms();
-      if (["consumos", "faltantes"].includes(target))
-        void loadRequirements();
-      if (target === "compras") void loadPurchaseAnalysis();
       if (target === "stock") void loadStock();
-      if (target === "usuarios") void loadUsers();
+      if (target === "compras") void loadPurchaseAnalysis();
+      if (target === "usuarios" && session?.role === "admin") void loadUsers();
     } else setView("pendiente");
   };
 
@@ -1460,17 +1552,7 @@ export default function Home() {
           <span>Planificación de Insumos</span>
         </button>
         <nav aria-label="Navegación principal">
-          {[
-            ["resumen", "Resumen"],
-            ["programacion", "Programación"],
-            ["productos", "Productos"],
-            ["bom", "Ficha técnica"],
-            ["consumos", "Consumos"],
-            ["stock", "Stock"],
-            ["faltantes", "Faltantes"],
-            ["compras", "Análisis compras"],
-            ["usuarios", "Administración"],
-          ]
+          {OPERATIONAL_NAV
             .filter(([id]) => canAccess(id))
             .map(([id, label]) => (
               <button
@@ -1486,21 +1568,6 @@ export default function Home() {
                 data-active={view === id}
               >
                 {label}
-                {![
-                  "resumen",
-                  "programacion",
-                  "productos",
-                  "bom",
-                  "consumos",
-                  "stock",
-                  "faltantes",
-                  "compras",
-                  "usuarios",
-                ].includes(id) && (
-                  <span className="nav-lock">
-                    <Icon name="lock" />
-                  </span>
-                )}
               </button>
             ))}
         </nav>
@@ -1715,14 +1782,14 @@ export default function Home() {
                   </span>
                   <div>
                     <h2>
-                      {requirementState.loading
-                        ? "Calculando compras…"
-                        : `${shortages.length} insumos requieren compra`}
+                      {purchaseRows.length
+                        ? `${purchaseSummary.toBuy} insumos requieren compra`
+                        : "Análisis de compras pendiente"}
                     </h2>
                     <p>
-                      {requirementState.loading
-                        ? "Actualizando fichas técnicas, stock y programa."
-                        : `${requirementState.mapped} operaciones calculadas con el programa vigente.`}
+                      {purchaseRows.length
+                        ? `${purchaseSummary.materials} insumos cruzados con stock y pendientes.`
+                        : "Cargá ESTIMADO, STOCK y PENDIENTE para calcular."}
                     </p>
                   </div>
                 </div>
@@ -1735,53 +1802,50 @@ export default function Home() {
                     </div>
                     <Icon name="check" />
                   </div>
-                  <div className={requirementState.mapped > 0 ? "ready" : ""}>
-                    <span>2</span>
-                    <div>
-                      <strong>Fichas técnicas</strong>
-                      <small>
-                        {bomProducts.length} aprobadas ·{" "}
-                        {requirementState.provisional} provisionales del Sheet
-                      </small>
-                    </div>
-                    <Icon
-                      name={requirementState.mapped > 0 ? "check" : "lock"}
-                    />
-                  </div>
                   <div className={stock.length > 0 ? "ready" : ""}>
-                    <span>3</span>
+                    <span>2</span>
                     <div>
                       <strong>Stock disponible</strong>
                       <small>
                         {stock.length
                           ? `${stock.length} insumos con existencia cargada`
-                          : "Pendiente de carga inicial"}
+                          : "Pendiente de carga"}
                       </small>
                     </div>
                     <Icon name={stock.length > 0 ? "check" : "lock"} />
                   </div>
+                  <div className={purchaseRows.length > 0 ? "ready" : ""}>
+                    <span>3</span>
+                    <div>
+                      <strong>Análisis de compras</strong>
+                      <small>
+                        {purchaseRows.length
+                          ? `${purchaseSummary.toBuy} compras sugeridas`
+                          : "Pendiente de cálculo"}
+                      </small>
+                    </div>
+                    <Icon name={purchaseRows.length > 0 ? "check" : "lock"} />
+                  </div>
                 </div>
                 <div className="honest-state">
                   <strong>
-                    {shortages.length ? "Reporte disponible" : "Estado actual"}
+                    {purchaseRows.length ? "Reporte disponible" : "Estado actual"}
                   </strong>
                   <p>
-                    {shortages.length
-                      ? `Hay ${shortages.length} materiales con faltante en las semanas programadas. Abrí Faltantes para revisarlos.`
-                      : requirements.length
-                        ? "El stock disponible cubre las necesidades calculadas del programa."
-                        : "Todavía faltan datos para calcular compras."}
+                    {purchaseRows.length
+                      ? `La compra redondeada total es ${formatPurchaseNumber(purchaseSummary.roundedTotal)} unidades.`
+                      : "Todavía faltan datos para calcular compras."}
                   </p>
                 </div>
                 <button
                   className="primary-button"
                   onClick={() => {
-                    setView(shortages.length ? "faltantes" : "programacion");
-                    if (shortages.length) void loadRequirements();
+                    setView(purchaseRows.length ? "compras" : "programacion");
+                    if (purchaseRows.length) void loadPurchaseAnalysis();
                   }}
                 >
-                  {shortages.length
-                    ? "Ver faltantes semanales"
+                  {purchaseRows.length
+                    ? "Ver análisis de compras"
                     : "Validar programación"}
                 </button>
               </article>
@@ -2882,397 +2946,200 @@ export default function Home() {
           </section>
         )}
 
-        {view === "faltantes" && (
-          <section>
+        {view === "compras" && (
+          <section className="purchase-analysis-view">
             <div className="page-heading compact">
               <div>
-                <p className="eyebrow">Control semanal</p>
-                <h1>Faltantes de la semana</h1>
-                <p>Demanda del programa vigente que supera el stock disponible.</p>
-              </div>
-              <button
-                className="refresh-button"
-                onClick={() => void loadRequirements()}
-              >
-                {requirementState.loading ? "Calculando…" : "Recalcular"}
-              </button>
-            </div>
-            <div className="bom-kpis">
-              <article>
-                <strong>{requirementState.mapped}</strong>
-                <span>operaciones calculadas</span>
-              </article>
-              <article>
-                <strong>{requirementState.provisional}</strong>
-                <span>fichas provisionales del Sheet</span>
-              </article>
-              <article data-warning={shortages.length > 0}>
-                <strong>{shortages.length}</strong>
-                <span>insumos con faltante</span>
-              </article>
-            </div>
-            {requirementState.completed > 0 && (
-              <p className="bom-message">
-                {requirementState.completed} operaciones ya realizadas fueron
-                excluidas del cálculo semanal.
-              </p>
-            )}
-            {requirementState.error ? (
-              <p className="bom-message consumption-error">
-                {requirementState.error}
-              </p>
-            ) : shortages.length === 0 ? (
-              <article className="empty-consumption">
-                <h2>
-                  {requirements.length
-                    ? "No hay faltantes semanales"
-                    : "Todavía no hay consumos calculables"}
-                </h2>
+                <p className="eyebrow">Compras e inventario</p>
+                <h1>Análisis de Compras</h1>
                 <p>
-                  {requirements.length
-                    ? "El stock disponible cubre las necesidades del programa actual."
-                    : `No se encontraron insumos para relacionar con el programa. ${requirementState.blocked} operaciones siguen bloqueadas.`}
+                  Cruce operativo entre necesidad, stock y pendientes
+                  confirmados.
                 </p>
+              </div>
+              <div className="purchase-analysis-actions">
+                <input
+                  ref={purchaseFilesRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  multiple
+                  hidden
+                  onChange={(event) => {
+                    if (event.target.files)
+                      void selectPurchaseFiles(event.target.files);
+                  }}
+                />
+                <button
+                  className="export-button"
+                  disabled={purchaseLoading}
+                  onClick={() => purchaseFilesRef.current?.click()}
+                >
+                  Cargar archivos
+                </button>
+                <button
+                  className="export-button"
+                  disabled={purchaseLoading || !requirements.length}
+                  onClick={() => void syncPurchaseAnalysisFromSheets()}
+                >
+                  Actualizar desde Sheets
+                </button>
+                <button
+                  className="export-button"
+                  disabled={purchaseLoading || !purchaseRows.length}
+                  onClick={() => void savePurchaseAnalysis()}
+                >
+                  Guardar confirmaciones
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={!purchaseRows.length}
+                  onClick={() => void exportPurchaseAnalysis()}
+                >
+                  Exportar Excel
+                </button>
+              </div>
+            </div>
+
+            <div className="purchase-analysis-kpis">
+              <article>
+                <span>Insumos analizados</span>
+                <strong>{purchaseSummary.materials}</strong>
+              </article>
+              <article>
+                <span>Con compra sugerida</span>
+                <strong>{purchaseSummary.toBuy}</strong>
+              </article>
+              <article>
+                <span>Compra redondeada total</span>
+                <strong>
+                  {formatPurchaseNumber(purchaseSummary.roundedTotal)}
+                </strong>
+              </article>
+              <article data-warning={purchaseSummary.criticalStock > 0}>
+                <span>Sin stock disponible</span>
+                <strong>{purchaseSummary.criticalStock}</strong>
+              </article>
+            </div>
+
+            {purchaseMessage && (
+              <p className="bom-message">{purchaseMessage}</p>
+            )}
+            <p className="purchase-analysis-help">
+              El pendiente confirmado debe incluir únicamente las entregas que
+              llegan antes de la producción del período.
+            </p>
+
+            {!purchaseRows.length ? (
+              <article className="empty-consumption">
+                <h2>Cargá los datos para iniciar el análisis</h2>
+                <p>
+                  Seleccioná juntos los archivos ESTIMADO, STOCK y PENDIENTE.
+                  Si existe una hoja ANALISIS, también se respetan sus valores
+                  confirmados.
+                </p>
+                <button
+                  className="primary-button"
+                  disabled={purchaseLoading}
+                  onClick={() => purchaseFilesRef.current?.click()}
+                >
+                  {purchaseLoading ? "Procesando…" : "Seleccionar archivos"}
+                </button>
               </article>
             ) : (
-              <article className="table-card">
+              <article className="table-card purchase-analysis-card">
                 <div className="table-toolbar">
                   <div>
-                    <h2>Materiales faltantes</h2>
+                    <h2>Tabla operativa</h2>
                     <p>
-                      {visibleShortages.length} de {shortages.length} insumos
+                      {visiblePurchaseRows.length} insumos visibles
+                      {purchasePeriod ? ` · ${purchasePeriod}` : ""}
                     </p>
+                    {purchaseUpdatedAt && (
+                      <small>
+                        Actualizado{" "}
+                        {new Intl.DateTimeFormat("es-AR", {
+                          dateStyle: "short",
+                          timeStyle: "short",
+                        }).format(new Date(purchaseUpdatedAt))}
+                      </small>
+                    )}
                   </div>
-                  <div className="purchase-toolbar-actions">
-                    <label className="search-box">
-                      <Icon name="search" />
-                      <input
-                        value={shortageQuery}
-                        onChange={(e) => setShortageQuery(e.target.value)}
-                        placeholder="Buscar insumo, producto o semana"
-                      />
-                    </label>
-                  </div>
+                  <label className="search-box">
+                    <Icon name="search" />
+                    <input
+                      value={purchaseQuery}
+                      onChange={(event) =>
+                        setPurchaseQuery(event.target.value)
+                      }
+                      placeholder="Buscar código o insumo"
+                    />
+                  </label>
                 </div>
                 <div className="table-scroll">
-                  <table>
+                  <table className="purchase-analysis-table">
                     <thead>
                       <tr>
-                        <th>Tipo</th>
-                        <th>Insumo</th>
-                        <th>Necesidad</th>
-                        <th>Disponible</th>
-                        <th>Faltante</th>
-                        <th>Semana</th>
+                        {PURCHASE_ANALYSIS_COLUMNS.map((column) => (
+                          <th key={column}>{column}</th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {visibleShortages.map((item) => (
+                      {visiblePurchaseRows.map((item) => (
                         <tr key={item.materialCode}>
-                          <td>{item.category}</td>
+                          <td className="purchase-material-cell">
+                            <strong>{item.materialCode}</strong>
+                            <span>{item.materialName}</span>
+                          </td>
                           <td>
-                            {item.materialCode} · {item.materialName}
+                            {formatPurchaseNumber(item.calculatedNeed)}
                           </td>
-                          <td>{formatNumber(item.total)}</td>
                           <td>
-                            <strong>{formatNumber(item.available)}</strong>
-                            {Object.keys(item.depots ?? {}).length ? (
-                              <small className="cell-detail">
-                                {Object.entries(item.depots ?? {})
-                                  .map(
-                                    ([depot, quantity]) =>
-                                      `${depotLabel(depot)}: ${formatNumber(quantity)}`,
-                                  )
-                                  .join(" · ")}
-                              </small>
-                            ) : null}
+                            <input
+                              aria-label={`Necesidad confirmada de ${item.materialCode}`}
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={item.confirmedNeed}
+                              onChange={(event) =>
+                                updatePurchaseConfirmation(
+                                  item.materialCode,
+                                  "confirmedNeed",
+                                  Number(event.target.value),
+                                )
+                              }
+                            />
                           </td>
-                          <td className="number-cell">
-                            {formatNumber(item.shortage)}
+                          <td>{formatPurchaseNumber(item.stock)}</td>
+                          <td>
+                            {formatPurchaseNumber(item.pendingDetected)}
                           </td>
-                          <td>{firstShortageWeek(item)}</td>
+                          <td>
+                            <input
+                              aria-label={`Pendiente confirmado de ${item.materialCode}`}
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={item.confirmedPending}
+                              onChange={(event) =>
+                                updatePurchaseConfirmation(
+                                  item.materialCode,
+                                  "confirmedPending",
+                                  Number(event.target.value),
+                                )
+                              }
+                            />
+                          </td>
+                          <td>{formatPurchaseNumber(item.exactPurchase)}</td>
+                          <td className="purchase-rounded-cell">
+                            {formatPurchaseNumber(item.roundedPurchase)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               </article>
-            )}
-          </section>
-        )}
-
-        {view === "compras" && (
-          <section>
-            <input
-              ref={purchaseFileRef}
-              type="file"
-              accept=".xlsx,.xls"
-              multiple
-              hidden
-              onChange={(event) =>
-                void selectPurchaseFiles(event.target.files)
-              }
-            />
-            <div className="page-heading compact">
-              <div>
-                <p className="eyebrow">Planificación mensual</p>
-                <h1>Análisis de compras</h1>
-                <p>
-                  Conecta ESTIMADO, STOCK y PENDIENTE para calcular lo que debe
-                  comprarse.
-                </p>
-              </div>
-              <div className="purchase-heading-actions">
-                <button
-                  className="secondary-button"
-                  disabled={purchaseImport.loading || purchaseImport.saving}
-                  onClick={() => purchaseFileRef.current?.click()}
-                >
-                  {purchaseImport.loading ? "Leyendo…" : "Cargar Excel"}
-                </button>
-                <button
-                  className="export-button"
-                  disabled={!purchaseAnalysis}
-                  onClick={() => void exportPurchases()}
-                >
-                  Exportar análisis
-                </button>
-                <button
-                  className="primary-button"
-                  disabled={!purchaseAnalysis || purchaseImport.saving}
-                  onClick={() => void savePurchaseAnalysis()}
-                >
-                  {purchaseImport.saving
-                    ? "Guardando…"
-                    : "Guardar y sincronizar"}
-                </button>
-              </div>
-            </div>
-
-            {purchaseImport.message && (
-              <p className="bom-message">{purchaseImport.message}</p>
-            )}
-            {purchaseImport.error && (
-              <p className="bom-message consumption-error">
-                {purchaseImport.error}
-              </p>
-            )}
-
-            {!purchaseAnalysis ? (
-              <article className="empty-consumption purchase-empty">
-                <h2>Cargá el archivo mensual</h2>
-                <p>
-                  Puede ser un único Excel con las hojas ESTIMADO, STOCK y
-                  PENDIENTE, o varios archivos seleccionados al mismo tiempo. La
-                  hoja ANALISIS es opcional y se utiliza para recuperar los
-                  ajustes confirmados.
-                </p>
-                <button
-                  className="primary-button"
-                  onClick={() => purchaseFileRef.current?.click()}
-                >
-                  Seleccionar archivos
-                </button>
-              </article>
-            ) : (
-              <>
-                <div className="purchase-source-card">
-                  <div>
-                    <span>Período</span>
-                    <strong>{purchaseAnalysis.period}</strong>
-                  </div>
-                  <div>
-                    <span>Hojas conectadas</span>
-                    <strong>
-                      {[
-                        purchaseAnalysis.sheets.estimated,
-                        purchaseAnalysis.sheets.stock,
-                        purchaseAnalysis.sheets.pending,
-                        purchaseAnalysis.sheets.analysis,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </strong>
-                  </div>
-                  <label>
-                    Redondear compras cada
-                    <input
-                      type="number"
-                      min="1"
-                      step="1000"
-                      value={purchaseAnalysis.rounding}
-                      onChange={(event) =>
-                        updatePurchaseRounding(Number(event.target.value))
-                      }
-                    />
-                  </label>
-                </div>
-
-                <div className="purchase-kpis">
-                  <article>
-                    <span>Necesidad confirmada</span>
-                    <strong>
-                      {formatNumber(purchaseAnalysis.summary.need)}
-                    </strong>
-                  </article>
-                  <article>
-                    <span>Stock consolidado</span>
-                    <strong>
-                      {formatNumber(purchaseAnalysis.summary.stock)}
-                    </strong>
-                  </article>
-                  <article>
-                    <span>Pendiente confirmado</span>
-                    <strong>
-                      {formatNumber(purchaseAnalysis.summary.pending)}
-                    </strong>
-                  </article>
-                  <article data-warning={purchaseAnalysis.summary.purchaseRounded > 0}>
-                    <span>Compra redondeada</span>
-                    <strong>
-                      {formatNumber(
-                        purchaseAnalysis.summary.purchaseRounded,
-                      )}
-                    </strong>
-                  </article>
-                </div>
-
-                {purchaseAnalysis.warnings.map((warning) => (
-                  <p className="purchase-warning" key={warning}>
-                    {warning}
-                  </p>
-                ))}
-
-                <article className="table-card purchase-analysis-card">
-                  <div className="table-toolbar">
-                    <div>
-                      <h2>Resultado por insumo</h2>
-                      <p>
-                        {visiblePurchaseAnalysis.length} insumos visibles ·
-                        cálculo compartido entre todos los usuarios
-                      </p>
-                    </div>
-                    <div className="purchase-toolbar-actions">
-                      <label className="purchase-check">
-                        <input
-                          type="checkbox"
-                          checked={showOnlyPurchases}
-                          onChange={(event) =>
-                            setShowOnlyPurchases(event.target.checked)
-                          }
-                        />
-                        Solo con compra
-                      </label>
-                      <label className="search-box">
-                        <Icon name="search" />
-                        <input
-                          value={purchaseQuery}
-                          onChange={(event) =>
-                            setPurchaseQuery(event.target.value)
-                          }
-                          placeholder="Buscar código, insumo o producto"
-                        />
-                      </label>
-                    </div>
-                  </div>
-                  <div className="table-scroll">
-                    <table className="purchase-analysis-table">
-                      <thead>
-                        <tr>
-                          <th>Insumo</th>
-                          <th>Necesidad calculada</th>
-                          <th>Necesidad confirmada</th>
-                          <th>Stock</th>
-                          <th>Pendiente detectado</th>
-                          <th>Pendiente confirmado</th>
-                          <th>Compra exacta</th>
-                          <th>Compra redondeada</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {visiblePurchaseAnalysis.map((item) => (
-                          <tr key={item.materialCode}>
-                            <td>
-                              <strong>{item.materialCode}</strong>
-                              <span className="cell-detail">
-                                {item.materialName}
-                              </span>
-                              {item.sourceCodes.length > 1 && (
-                                <span className="alias-badge">
-                                  Consolida {item.sourceCodes.join(" + ")}
-                                </span>
-                              )}
-                              {item.notes.length > 0 && (
-                                <small className="cell-detail">
-                                  {item.notes.join(" ")}
-                                </small>
-                              )}
-                            </td>
-                            <td>{formatNumber(item.calculatedNeed)}</td>
-                            <td>
-                              <input
-                                className="analysis-number-input"
-                                type="number"
-                                min="0"
-                                value={item.confirmedNeed}
-                                onChange={(event) =>
-                                  updatePurchaseAmount(
-                                    item.materialCode,
-                                    "confirmedNeed",
-                                    Number(event.target.value),
-                                  )
-                                }
-                              />
-                            </td>
-                            <td>
-                              <strong>{formatNumber(item.stock)}</strong>
-                              {Object.keys(item.depots).length > 0 && (
-                                <small className="cell-detail">
-                                  {Object.entries(item.depots)
-                                    .map(
-                                      ([depot, quantity]) =>
-                                        `${depotLabel(depot)}: ${formatNumber(quantity)}`,
-                                    )
-                                    .join(" · ")}
-                                </small>
-                              )}
-                            </td>
-                            <td>{formatNumber(item.pendingDetected)}</td>
-                            <td>
-                              <input
-                                className="analysis-number-input"
-                                type="number"
-                                min="0"
-                                value={item.pendingConfirmed}
-                                onChange={(event) =>
-                                  updatePurchaseAmount(
-                                    item.materialCode,
-                                    "pendingConfirmed",
-                                    Number(event.target.value),
-                                  )
-                                }
-                              />
-                              <small className="cell-detail">
-                                {item.adjustmentSource === "analysis"
-                                  ? "Tomado de ANALISIS"
-                                  : item.adjustmentSource === "manual"
-                                    ? "Ajustado manualmente"
-                                    : "Detectado automáticamente"}
-                              </small>
-                            </td>
-                            <td className="number-cell">
-                              {formatNumber(item.shortageExact)}
-                            </td>
-                            <td className="number-cell purchase-quantity">
-                              {formatNumber(item.purchaseRounded)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </article>
-              </>
             )}
           </section>
         )}
@@ -3372,11 +3239,7 @@ export default function Home() {
                     <legend>Módulos habilitados</legend>
                     {[
                       ["programacion", "Programación"],
-                      ["productos", "Productos"],
-                      ["bom", "Ficha técnica"],
-                      ["consumos", "Consumos"],
                       ["stock", "Stock"],
-                      ["faltantes", "Faltantes"],
                       ["compras", "Análisis compras"],
                     ].map(([id, label]) => (
                       <label key={id}>
