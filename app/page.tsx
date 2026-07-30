@@ -375,6 +375,8 @@ export default function Home() {
   const [purchaseQuery, setPurchaseQuery] = useState("");
   const [purchaseLoading, setPurchaseLoading] = useState(false);
   const [purchaseMessage, setPurchaseMessage] = useState("");
+  const purchaseConfirmationsDirtyRef = useRef(false);
+  const purchaseImportInProgressRef = useRef(false);
   const [users, setUsers] = useState<
     Array<{
       id: number;
@@ -875,10 +877,13 @@ export default function Home() {
         throw new Error(
           payload.error || "No se pudo leer el análisis de compras.",
         );
+      if (purchaseImportInProgressRef.current || purchaseConfirmationsDirtyRef.current)
+        return;
       setPurchaseRows(payload.rows ?? []);
       setPurchaseSourceFiles(payload.sourceFiles ?? []);
       setPurchasePeriod(payload.periodLabel ?? "");
       setPurchaseUpdatedAt(payload.updatedAt ?? "");
+      purchaseConfirmationsDirtyRef.current = false;
       setPurchaseMessage("");
     } catch (error) {
       setPurchaseMessage(
@@ -912,6 +917,7 @@ export default function Home() {
       setPurchaseSourceFiles(payload.sourceFiles ?? []);
       setPurchasePeriod(payload.periodLabel ?? "");
       setPurchaseUpdatedAt(payload.updatedAt ?? "");
+      purchaseConfirmationsDirtyRef.current = false;
       setPurchaseMessage(
         "Análisis guardado y disponible para todos los usuarios.",
       );
@@ -931,8 +937,19 @@ export default function Home() {
     const selectedFiles = Array.from(files);
     if (!selectedFiles.length) return;
     setPurchaseLoading(true);
+    purchaseImportInProgressRef.current = true;
     setPurchaseMessage("Leyendo ESTIMADO, STOCK y PENDIENTE…");
     try {
+      const savedSnapshotPromise = fetch("/api/purchase-analysis", {
+        cache: "no-store",
+      })
+        .then(async (response) => {
+          const payload = await responseJson<
+            PurchaseAnalysisSnapshot & { error?: string }
+          >(response);
+          return response.ok ? payload : null;
+        })
+        .catch(() => null);
       const XLSX = await import("xlsx");
       const sheets: PurchaseWorkbookSheet[] = [];
       for (const file of selectedFiles) {
@@ -969,7 +986,16 @@ export default function Home() {
           parsed.diagnostics[0] ||
             "No se encontraron insumos para analizar en los archivos.",
         );
-      const rows = mergeSavedConfirmations(parsed.rows, purchaseRows);
+      const savedSnapshot = await savedSnapshotPromise;
+      let rows = mergeSavedConfirmations(
+        parsed.rows,
+        savedSnapshot?.rows ?? [],
+      );
+      // Las ediciones todavía no guardadas en esta pantalla tienen prioridad
+      // sobre la copia del servidor. Así, cargar tres archivos separados o un
+      // libro con tres hojas no reemplaza Necesidad/Pendiente confirmados.
+      if (purchaseConfirmationsDirtyRef.current)
+        rows = mergeSavedConfirmations(rows, purchaseRows);
       const sourceFiles = selectedFiles.map((file) => file.name);
       setPurchaseRows(rows);
       setPurchaseSourceFiles(sourceFiles);
@@ -1008,6 +1034,7 @@ export default function Home() {
           : "No se pudieron procesar los archivos.",
       );
     } finally {
+      purchaseImportInProgressRef.current = false;
       setPurchaseLoading(false);
       if (purchaseFilesRef.current) purchaseFilesRef.current.value = "";
     }
@@ -1017,6 +1044,7 @@ export default function Home() {
     field: "confirmedNeed" | "confirmedPending",
     value: number,
   ) => {
+    purchaseConfirmationsDirtyRef.current = true;
     setPurchaseRows((current) =>
       current.map((row) =>
         row.materialCode === materialCode
@@ -1028,11 +1056,16 @@ export default function Home() {
       ),
     );
     setPurchaseMessage(
-      "Hay cambios sin guardar. Presioná Guardar confirmaciones.",
+      "Hay cambios sin guardar. Podés guardarlos o exportar; al exportar se guardarán automáticamente.",
     );
   };
   const exportPurchaseAnalysis = async () => {
     if (!purchaseRows.length) return;
+    let rowsToExport = purchaseRows;
+    if (purchaseConfirmationsDirtyRef.current) {
+      const saved = await savePurchaseAnalysis();
+      if (saved?.rows?.length) rowsToExport = saved.rows;
+    }
     setPurchaseMessage("Generando Excel con el formato de análisis…");
     try {
       const ExcelJS = (await import("exceljs")).default;
@@ -1057,7 +1090,7 @@ export default function Home() {
         { key: "balance", width: 18 },
       ];
 
-      const data = purchaseAnalysisExportRows(purchaseRows);
+      const data = purchaseAnalysisExportRows(rowsToExport);
       for (const row of data) worksheet.addRow(row);
       const header = worksheet.getRow(1);
       header.height = 24;

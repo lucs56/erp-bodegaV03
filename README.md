@@ -7,7 +7,8 @@
 - Google Sheets no interviene en el cálculo de compras.
 - Los códigos compatibles `30354`/`30354A` y `71684C`/`71684D` comparten stock y pendiente en una sola necesidad.
 - En compras, el stock disponible se calcula exclusivamente como Depósito 2 + C18.
-- Las correcciones de Necesidad confirmada y Pendiente confirmado se conservan al volver a cargar los Excel.
+- Las correcciones de Necesidad confirmada y Pendiente confirmado se conservan al volver a cargar los Excel, tanto con tres archivos separados como con un único libro de tres hojas.
+- Al importar, las confirmaciones guardadas en el servidor se recuperan antes de recalcular; las ediciones locales sin guardar tienen prioridad.
 - Fórmula aplicada: `Compra exacta = Necesidad confirmada - Stock - Pendiente confirmado`, con mínimo cero.
 - La compra recomendada se redondea siempre hacia arriba al próximo múltiplo de 10.000.
 - El saldo exportado se calcula como `Stock + Pendiente - Necesidad`; un valor negativo indica cuánto falta comprar.

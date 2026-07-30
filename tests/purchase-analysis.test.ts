@@ -462,3 +462,65 @@ test("usa ESTIMADO, STOCK y PENDIENTE aunque exista una hoja Análisis conflicti
     roundedPurchase: 10_000,
   });
 });
+
+test("restaura necesidad y pendiente confirmados antes de exportar", () => {
+  const imported = parsePurchaseWorkbook([
+    {
+      name: "ESTIMADO · estimado.xlsx",
+      rows: [{ Insumo: "20028", Descripción: "CORCHO", Necesidad: 4_205_337.064 }],
+    },
+    {
+      name: "STOCK · stock.xlsx",
+      rows: [{ Insumo: "20028", Descripción: "CORCHO", "2": 200_000, C18: 91_700 }],
+    },
+    {
+      name: "PENDIENTE · pendiente.xlsx",
+      rows: [{ Insumo: "20028", Pendiente: 52_150 }],
+    },
+  ]).rows;
+
+  const saved = [
+    {
+      ...imported[0]!,
+      confirmedNeed: 4_350_000,
+      confirmedPending: 1_100_000,
+      exactPurchase: 0,
+      roundedPurchase: 0,
+    },
+  ];
+
+  const merged = mergeSavedConfirmations(imported, saved);
+  assert.equal(merged[0]?.calculatedNeed, 4_205_337.064);
+  assert.equal(merged[0]?.pendingDetected, 52_150);
+  assert.equal(merged[0]?.confirmedNeed, 4_350_000);
+  assert.equal(merged[0]?.confirmedPending, 1_100_000);
+  assert.equal(merged[0]?.exactPurchase, 2_958_300);
+  assert.deepEqual(purchaseAnalysisExportRows(merged)[1], [
+    "20028",
+    "CORCHO",
+    291_700,
+    1_100_000,
+    4_350_000,
+    -2_958_300,
+  ]);
+});
+
+test("tres archivos separados y un libro de tres hojas calculan lo mismo", () => {
+  const estimateRows = [{ Insumo: "10248", Descripción: "BOTELLA", Necesidad: 1_140_566.6556933399 }];
+  const stockRows = [{ Insumo: "10248", Descripción: "BOTELLA", "2": 250_000, C18: 40_276 }];
+  const pendingRows = [{ Insumo: "10248", Pendiente: 234_246 }];
+
+  const separate = parsePurchaseWorkbook([
+    { name: "Hoja1 · ESTIMADO.xlsx", rows: estimateRows },
+    { name: "Hoja1 · STOCK.xlsx", rows: stockRows },
+    { name: "Hoja1 · PENDIENTE.xlsx", rows: pendingRows },
+  ]);
+  const consolidated = parsePurchaseWorkbook([
+    { name: "ESTIMADO · compras.xlsx", rows: estimateRows },
+    { name: "STOCK · compras.xlsx", rows: stockRows },
+    { name: "PENDIENTE · compras.xlsx", rows: pendingRows },
+  ]);
+
+  assert.deepEqual(separate.detectedSources, consolidated.detectedSources);
+  assert.deepEqual(separate.rows, consolidated.rows);
+});
