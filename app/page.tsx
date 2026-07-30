@@ -14,10 +14,9 @@ import {
 } from "../lib/assistant";
 import {
   PURCHASE_ANALYSIS_COLUMNS,
-  canonicalMaterialCode,
-  mergeSavedConfirmations,
   parsePurchaseWorkbook,
-  purchaseAnalysisTableRows,
+  purchaseAnalysisExportRows,
+  purchaseRecordsFromMatrix,
   recalculatePurchaseRow,
   type PurchaseAnalysisRow,
   type PurchaseAnalysisSnapshot,
@@ -931,7 +930,7 @@ export default function Home() {
     const selectedFiles = Array.from(files);
     if (!selectedFiles.length) return;
     setPurchaseLoading(true);
-    setPurchaseMessage("Leyendo ESTIMADO, STOCK, PENDIENTE y ANALISIS…");
+    setPurchaseMessage("Leyendo ESTIMADO, STOCK y PENDIENTE…");
     try {
       const XLSX = await import("xlsx");
       const sheets: PurchaseWorkbookSheet[] = [];
@@ -943,32 +942,33 @@ export default function Home() {
         for (const name of workbook.SheetNames) {
           const sheet = workbook.Sheets[name];
           if (!sheet) continue;
+          const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+            header: 1,
+            defval: "",
+            raw: true,
+          });
           sheets.push({
-            name,
-            rows: XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-              defval: "",
-              raw: true,
-            }),
+            name: `${name} · ${file.name}`,
+            rows: purchaseRecordsFromMatrix(matrix),
           });
         }
       }
-      const parsed = parsePurchaseWorkbook(sheets, stock);
+      const parsed = parsePurchaseWorkbook(sheets);
+      const missingSources = [
+        !parsed.detectedSources.estimate ? "ESTIMADO" : "",
+        !parsed.detectedSources.stock ? "STOCK" : "",
+        !parsed.detectedSources.pending ? "PENDIENTE" : "",
+      ].filter(Boolean);
+      if (missingSources.length)
+        throw new Error(
+          `Falta cargar ${missingSources.join(", ")}. Seleccioná juntos los tres archivos.`,
+        );
       if (!parsed.rows.length)
         throw new Error(
           parsed.diagnostics[0] ||
             "No se encontraron insumos para analizar en los archivos.",
         );
-      const includesAnalysis = sheets.some((sheet) =>
-        sheet.name
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toLocaleLowerCase("es")
-          .includes("analisis"),
-      );
-      const rows =
-        purchaseRows.length && !includesAnalysis
-          ? mergeSavedConfirmations(parsed.rows, purchaseRows)
-          : parsed.rows;
+      const rows = parsed.rows;
       const sourceFiles = selectedFiles.map((file) => file.name);
       setPurchaseRows(rows);
       setPurchaseSourceFiles(sourceFiles);
@@ -1030,93 +1030,102 @@ export default function Home() {
       "Hay cambios sin guardar. Presioná Guardar confirmaciones.",
     );
   };
-  const syncPurchaseAnalysisFromSheets = async () => {
-    if (!requirements.length) {
-      setPurchaseMessage(
-        "Todavía no hay necesidades calculadas. Actualizá Programación y volvé a intentarlo.",
-      );
-      return;
-    }
-    setPurchaseLoading(true);
-    setPurchaseMessage(
-      "Cruzando la programación de Google Sheets con el stock y los pendientes…",
-    );
-    try {
-      const previous = new Map(
-        purchaseRows.map((row) => [
-          canonicalMaterialCode(row.materialCode),
-          row,
-        ]),
-      );
-      const parsed = parsePurchaseWorkbook(
-        [
-          {
-            name: `ESTIMADO ${weeks.map((week) => week.label).join(" · ")}`,
-            rows: requirements.map((item) => ({
-              "Código de insumo": item.materialCode,
-              "Nombre del insumo": item.materialName,
-              "Necesidad calculada": item.total,
-            })),
-          },
-        ],
-        stock,
-      );
-      const rows = parsed.rows.map((row) => {
-        const saved = previous.get(canonicalMaterialCode(row.materialCode));
-        return recalculatePurchaseRow({
-          ...row,
-          confirmedNeed: row.calculatedNeed,
-          pendingDetected: saved?.pendingDetected ?? 0,
-          confirmedPending:
-            saved?.confirmedPending ?? saved?.pendingDetected ?? 0,
-        });
-      });
-      const sourceFiles = [
-        "Google Sheets · Programación Junín",
-        ...purchaseSourceFiles.filter((name) =>
-          /pendient|stock|analisis/i.test(
-            name
-              .normalize("NFD")
-              .replace(/[\u0300-\u036f]/g, ""),
-          ),
-        ),
-      ];
-      const periodLabel = weeks.map((week) => week.label).join(" · ");
-      const saved = await savePurchaseAnalysis(
-        rows,
-        [...new Set(sourceFiles)],
-        periodLabel,
-      );
-      if (saved)
-        setPurchaseMessage(
-          `${rows.length} insumos actualizados desde Google Sheets y cruzados con el stock vigente.`,
-        );
-    } finally {
-      setPurchaseLoading(false);
-    }
-  };
   const exportPurchaseAnalysis = async () => {
     if (!purchaseRows.length) return;
-    const XLSX = await import("xlsx");
-    const data = purchaseAnalysisTableRows(purchaseRows);
-    const sheet = XLSX.utils.aoa_to_sheet(data);
-    sheet["!cols"] = [
-      { wch: 42 },
-      { wch: 22 },
-      { wch: 23 },
-      { wch: 16 },
-      { wch: 21 },
-      { wch: 22 },
-      { wch: 18 },
-      { wch: 21 },
-    ];
-    if (sheet["!ref"]) sheet["!autofilter"] = { ref: sheet["!ref"] };
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, sheet, "Análisis compras");
-    XLSX.writeFile(
-      workbook,
-      `analisis-compras-${new Date().toISOString().slice(0, 10)}.xlsx`,
-    );
+    setPurchaseMessage("Generando Excel con el formato de análisis…");
+    try {
+      const ExcelJS = (await import("exceljs")).default;
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "Planificación de Insumos";
+      workbook.created = new Date();
+      const worksheet = workbook.addWorksheet("ANALISIS", {
+        views: [{ state: "frozen", ySplit: 1 }],
+        pageSetup: {
+          orientation: "landscape",
+          fitToPage: true,
+          fitToWidth: 1,
+          fitToHeight: 0,
+        },
+      });
+      worksheet.columns = [
+        { key: "code", width: 18 },
+        { key: "description", width: 48 },
+        { key: "stock", width: 18 },
+        { key: "pending", width: 18 },
+        { key: "need", width: 18 },
+        { key: "balance", width: 18 },
+      ];
+
+      const data = purchaseAnalysisExportRows(purchaseRows);
+      for (const row of data) worksheet.addRow(row);
+      const header = worksheet.getRow(1);
+      header.height = 24;
+      header.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FF111827" } };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFD9E1E8" },
+        };
+        cell.alignment = { vertical: "middle", horizontal: "left" };
+      });
+
+      for (let rowNumber = 1; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+        const row = worksheet.getRow(rowNumber);
+        row.eachCell({ includeEmpty: true }, (cell, columnNumber) => {
+          cell.border = {
+            top: { style: "thin", color: { argb: "FF000000" } },
+            left: { style: "thin", color: { argb: "FF000000" } },
+            bottom: { style: "thin", color: { argb: "FF000000" } },
+            right: { style: "thin", color: { argb: "FF000000" } },
+          };
+          cell.alignment = {
+            ...cell.alignment,
+            vertical: "middle",
+            horizontal: columnNumber >= 3 ? "right" : "left",
+          };
+          if (rowNumber > 1 && columnNumber >= 3)
+            cell.numFmt = "#,##0;[Red]-#,##0";
+        });
+        if (rowNumber > 1) {
+          const purchaseCell = row.getCell(6);
+          if (Number(purchaseCell.value ?? 0) < 0) {
+            purchaseCell.fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: "FFF4CCCC" },
+            };
+            purchaseCell.font = { color: { argb: "FFC00000" } };
+          }
+        }
+      }
+      worksheet.autoFilter = {
+        from: { row: 1, column: 1 },
+        to: { row: worksheet.rowCount, column: 6 },
+      };
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `analisis-compras-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setPurchaseMessage(
+        "Excel generado con el mismo orden y formato visual del análisis manual.",
+      );
+    } catch (error) {
+      setPurchaseMessage(
+        error instanceof Error
+          ? error.message
+          : "No se pudo generar el archivo Excel.",
+      );
+    }
   };
   const exportPurchases = async () => {
     if (!shortages.length) return;
@@ -2978,13 +2987,6 @@ export default function Home() {
                 </button>
                 <button
                   className="export-button"
-                  disabled={purchaseLoading || !requirements.length}
-                  onClick={() => void syncPurchaseAnalysisFromSheets()}
-                >
-                  Actualizar desde Sheets
-                </button>
-                <button
-                  className="export-button"
                   disabled={purchaseLoading || !purchaseRows.length}
                   onClick={() => void savePurchaseAnalysis()}
                 >
@@ -3025,8 +3027,9 @@ export default function Home() {
               <p className="bom-message">{purchaseMessage}</p>
             )}
             <p className="purchase-analysis-help">
-              El pendiente confirmado debe incluir únicamente las entregas que
-              llegan antes de la producción del período.
+              El análisis se calcula únicamente con los archivos ESTIMADO,
+              STOCK y PENDIENTE. Los valores confirmados permiten reflejar un
+              ajuste operativo antes de exportar.
             </p>
 
             {!purchaseRows.length ? (
@@ -3034,8 +3037,8 @@ export default function Home() {
                 <h2>Cargá los datos para iniciar el análisis</h2>
                 <p>
                   Seleccioná juntos los archivos ESTIMADO, STOCK y PENDIENTE.
-                  Si existe una hoja ANALISIS, también se respetan sus valores
-                  confirmados.
+                  La aplicación reconoce automáticamente sus columnas y cruza
+                  necesidad, existencias y entregas pendientes.
                 </p>
                 <button
                   className="primary-button"

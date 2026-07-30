@@ -3,29 +3,28 @@
 ## Entrega simplificada de compras
 
 - Navegación operativa reducida a `Resumen`, `Programación`, `Stock`, `Análisis compras` y `Administración`.
-- `Análisis compras` admite los archivos ESTIMADO, STOCK, PENDIENTE y, cuando existe, ANALISIS.
-- El botón `Actualizar desde Sheets` toma las necesidades ya calculadas desde la programación vinculada, las cruza con el stock vigente y conserva los pendientes confirmados.
+- `Análisis compras` se alimenta exclusivamente de los archivos ESTIMADO, STOCK y PENDIENTE seleccionados en una misma carga.
+- Google Sheets no interviene en el cálculo de compras.
 - Los códigos `30354` y `30354A` se consolidan como un único insumo.
 - Fórmula aplicada: `Compra exacta = Necesidad confirmada - Stock - Pendiente confirmado`, con mínimo cero.
 - La compra recomendada se redondea siempre hacia arriba al próximo millar.
-- Si PENDIENTE incluye fecha prevista, entrega, arribo o ETA, el sistema descuenta automáticamente solo lo que llega dentro del período analizado. El valor confirmado puede corregirse antes de guardar.
+- El saldo exportado se calcula como `Stock + Pendiente - Necesidad`; un valor negativo indica cuánto falta comprar.
+- El valor confirmado de necesidad y pendiente puede corregirse antes de guardar.
 - El resultado se guarda en Cloudflare D1 para que todos los usuarios vean el mismo cálculo.
-- La exportación Excel reproduce exactamente las ocho columnas visibles de la tabla, en el mismo orden y sin columnas auxiliares.
+- La exportación Excel usa las seis columnas del análisis manual, bordes, separadores de miles y resalta en rojo los saldos negativos.
 - Base D1 configurada: `erpcompras`.
 
 ### Flujo operativo
 
-1. Revisar `Programación` y actualizar Google Sheets.
-2. Cargar o corregir el `Stock`.
-3. Abrir `Análisis compras`.
-4. Usar `Actualizar desde Sheets` para el programa vigente, o `Cargar archivos` para seleccionar juntos ESTIMADO, STOCK, PENDIENTE y ANALISIS.
-5. Confirmar necesidad y pendiente, guardar y exportar el Excel.
+1. Abrir `Análisis compras`.
+2. Presionar `Cargar archivos`.
+3. Seleccionar juntos ESTIMADO, STOCK y PENDIENTE.
+4. Revisar la necesidad y el pendiente detectados.
+5. Si corresponde, confirmar ajustes, guardar y exportar el Excel.
 
 Las únicas columnas exportadas son:
 
-`INSUMO`, `NECESIDAD CALCULADA`, `NECESIDAD CONFIRMADA`, `STOCK`,
-`PENDIENTE DETECTADO`, `PENDIENTE CONFIRMADO`, `COMPRA EXACTA` y
-`COMPRA REDONDEADA`.
+`Codigo`, `Descripcion`, `Stock`, `Pendiente`, `Necesidad` y `A comprar`.
 
 ## Mejoras de esta entrega
 

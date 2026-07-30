@@ -9,6 +9,15 @@ export const PURCHASE_ANALYSIS_COLUMNS = [
   "COMPRA REDONDEADA",
 ] as const;
 
+export const PURCHASE_ANALYSIS_EXPORT_COLUMNS = [
+  "Codigo",
+  "Descripcion",
+  "Stock",
+  "Pendiente",
+  "Necesidad",
+  "A comprar",
+] as const;
+
 export type PurchaseAnalysisRow = {
   materialCode: string;
   materialName: string;
@@ -40,6 +49,22 @@ export function purchaseAnalysisTableRows(rows: PurchaseAnalysisRow[]) {
       row.confirmedPending,
       row.exactPurchase,
       row.roundedPurchase,
+    ]),
+  ];
+}
+
+export function purchaseAnalysisExportRows(rows: PurchaseAnalysisRow[]) {
+  return [
+    [...PURCHASE_ANALYSIS_EXPORT_COLUMNS],
+    ...rows.map((row) => [
+      row.materialCode,
+      row.materialName,
+      row.stock,
+      row.confirmedPending,
+      row.confirmedNeed,
+      roundOperationalNumber(
+        row.stock + row.confirmedPending - row.confirmedNeed,
+      ),
     ]),
   ];
 }
@@ -100,7 +125,12 @@ const MATERIAL_COLUMNS: Array<{
     perCase: false,
   },
   {
-    aliases: ["caps tapa", "capsula tapa", "capsula", "tapa"],
+    aliases: ["tapa"],
+    category: "Cápsulas y tapas",
+    perCase: false,
+  },
+  {
+    aliases: ["capsulas", "capsula", "caps tapa", "capsula tapa"],
     category: "Cápsulas y tapas",
     perCase: false,
   },
@@ -116,6 +146,122 @@ const MATERIAL_COLUMNS: Array<{
     perCase: false,
   },
 ];
+
+export type PurchaseWorkbookSources = {
+  estimate: boolean;
+  stock: boolean;
+  pending: boolean;
+};
+
+/**
+ * Convierte una hoja leída como matriz en registros con encabezados.
+ *
+ * Los reportes reales no siempre empiezan en la primera fila. ESTIMADO,
+ * además, distribuye sus encabezados entre dos filas. PENDIENTE puede incluir
+ * una tabla dinámica auxiliar a la derecha. Esta función reconoce esos tres
+ * formatos sin pedirle al usuario que configure columnas.
+ */
+export function purchaseRecordsFromMatrix(
+  matrix: unknown[][],
+): Record<string, unknown>[] {
+  if (!matrix.length) return [];
+
+  const estimateDetailIndex = matrix
+    .slice(0, 12)
+    .findIndex((row) => {
+      const headers = row.map((cell) => normalizeText(String(cell ?? "")));
+      return (
+        headers.includes("total cajas") &&
+        headers.includes("total botellas") &&
+        headers.some((header) => header === "botella")
+      );
+    });
+  if (estimateDetailIndex >= 0) {
+    const primaryIndex = findHeaderRow(
+      matrix.slice(0, estimateDetailIndex + 1),
+      ["codigo", "variedad", "presentacion"],
+    );
+    const primary = primaryIndex >= 0 ? matrix[primaryIndex] ?? [] : [];
+    const detail = matrix[estimateDetailIndex] ?? [];
+    const width = Math.max(primary.length, detail.length);
+    const headers = Array.from({ length: width }, (_, index) => {
+      const detailHeader = headerText(detail[index]);
+      const primaryHeader = headerText(primary[index]);
+      return detailHeader || primaryHeader || `Columna ${index + 1}`;
+    });
+    return recordsAfterHeader(matrix, headers, estimateDetailIndex + 1);
+  }
+
+  const pendingHeaderIndex = matrix
+    .slice(0, 12)
+    .findIndex((row) => {
+      const headers = row.map((cell) => normalizeText(String(cell ?? "")));
+      return (
+        headers.some((header) => header === "producto c") &&
+        headers.some((header) => header === "c por d e")
+      );
+    });
+  if (pendingHeaderIndex >= 0) {
+    const pendingHeaders = (matrix[pendingHeaderIndex] ?? []).map(
+      (cell, index) => headerText(cell) || `Columna ${index + 1}`,
+    );
+    const mainRecords = recordsAfterHeader(
+      matrix,
+      pendingHeaders,
+      pendingHeaderIndex + 1,
+    );
+    const descriptions = new Map<string, string>();
+    for (const row of mainRecords) {
+      const code = materialCodeFromRow(row);
+      if (code) descriptions.set(code, materialNameFromRow(row));
+    }
+
+    const pivotHeaderIndex = matrix
+      .slice(pendingHeaderIndex + 1, pendingHeaderIndex + 8)
+      .findIndex((row) =>
+        row.some((cell) =>
+          normalizeText(String(cell ?? "")).includes("etiquetas de fila"),
+        ),
+      );
+    if (pivotHeaderIndex >= 0) {
+      const absolutePivotHeaderIndex =
+        pendingHeaderIndex + 1 + pivotHeaderIndex;
+      const pivotHeader = matrix[absolutePivotHeaderIndex] ?? [];
+      const codeColumn = pivotHeader.findIndex((cell) =>
+        normalizeText(String(cell ?? "")).includes("etiquetas de fila"),
+      );
+      const balanceColumn = pivotHeader.findIndex((cell) =>
+        normalizeText(String(cell ?? "")).includes("suma de c por d e"),
+      );
+      if (codeColumn >= 0 && balanceColumn >= 0) {
+        const pivotRecords: Record<string, unknown>[] = [];
+        for (
+          let rowIndex = absolutePivotHeaderIndex + 1;
+          rowIndex < matrix.length;
+          rowIndex += 1
+        ) {
+          const row = matrix[rowIndex] ?? [];
+          const code = canonicalMaterialCode(row[codeColumn]);
+          if (!code) continue;
+          pivotRecords.push({
+            "Producto/C": code,
+            "Descripcion Producto/C": descriptions.get(code) ?? "",
+            "C.por D./E.": row[balanceColumn],
+          });
+        }
+        if (pivotRecords.length) return pivotRecords;
+      }
+    }
+    return mainRecords;
+  }
+
+  const headerIndex = bestHeaderRow(matrix.slice(0, 20));
+  if (headerIndex < 0) return [];
+  const headers = (matrix[headerIndex] ?? []).map(
+    (cell, index) => headerText(cell) || `Columna ${index + 1}`,
+  );
+  return recordsAfterHeader(matrix, headers, headerIndex + 1);
+}
 
 export function parseLocalizedNumber(value: unknown): number {
   if (typeof value === "number") return Number.isFinite(value) ? value : 0;
@@ -207,44 +353,61 @@ export function parsePurchaseWorkbook(
   stockItems: PurchaseStockItem[];
   periodLabel: string;
   diagnostics: string[];
+  detectedSources: PurchaseWorkbookSources;
 } {
   const diagnostics: string[] = [];
   const estimate = new Map<string, PartialMaterial>();
-  const analysis = new Map<string, PartialMaterial>();
   const pending = new Map<string, PartialMaterial>();
   const importedStock = new Map<string, PartialMaterial>();
   const periodNames = new Set<string>();
   const planningEnd = detectPlanningEnd(sheets);
+  const detectedSources: PurchaseWorkbookSources = {
+    estimate: false,
+    stock: false,
+    pending: false,
+  };
 
   for (const sheet of sheets) {
     const sheetName = normalizeText(sheet.name);
+    const tabName = normalizeText(sheet.name.split(" · ")[0] ?? sheet.name);
+    const classifiedName = [
+      "analisis",
+      "pendient",
+      "stock",
+      "existencia",
+      "inventario",
+      "estim",
+      "plan",
+      "proyeccion",
+    ].some((marker) => tabName.includes(marker))
+      ? tabName
+      : sheetName;
     if (MONTH_HEADERS.some((month) => sheetName.includes(month)))
       periodNames.add(sheet.name.trim());
 
-    if (sheetName.includes("analisis")) {
-      for (const row of sheet.rows)
-        mergeMaterial(analysis, parseAnalysisRow(row));
-      continue;
-    }
-    if (sheetName.includes("pendient")) {
+    if (classifiedName.includes("analisis")) continue;
+    if (classifiedName.includes("pendient")) {
+      detectedSources.pending = true;
       for (const row of sheet.rows)
         mergeMaterial(pending, parsePendingRow(row, planningEnd));
       continue;
     }
     if (
-      sheetName.includes("stock") ||
-      sheetName.includes("existencia") ||
-      sheetName.includes("inventario")
+      classifiedName.includes("stock") ||
+      classifiedName.includes("existencia") ||
+      classifiedName.includes("inventario")
     ) {
+      detectedSources.stock = true;
       for (const row of sheet.rows)
         mergeMaterial(importedStock, parseStockRow(row));
       continue;
     }
     if (
-      sheetName.includes("estim") ||
-      sheetName.includes("plan") ||
-      sheetName.includes("proyeccion")
+      classifiedName.includes("estim") ||
+      classifiedName.includes("plan") ||
+      classifiedName.includes("proyeccion")
     ) {
+      detectedSources.estimate = true;
       for (const row of sheet.rows) {
         const direct = parseEstimateMaterialRow(row);
         if (direct) mergeMaterial(estimate, direct);
@@ -252,7 +415,10 @@ export function parsePurchaseWorkbook(
           for (const item of parseEstimatedProductRow(row))
             mergeMaterial(estimate, item);
       }
+      continue;
     }
+    // ANALISIS es el resultado manual de referencia, no una fuente operativa.
+    // El cálculo productivo se alimenta exclusivamente de los tres reportes.
   }
 
   const existingStock = new Map<string, PartialMaterial>();
@@ -266,44 +432,29 @@ export function parsePurchaseWorkbook(
       depots: item.depots,
     });
 
-  const codes = new Set([
-    ...estimate.keys(),
-    ...analysis.keys(),
-    ...pending.keys(),
-    ...importedStock.keys(),
-  ]);
+  // Solo se analizan insumos requeridos por ESTIMADO. STOCK y PENDIENTE son
+  // fuentes de cruce y no deben agregar materiales ajenos al plan de compra.
+  const codes = new Set(estimate.keys());
   const rows = [...codes]
     .map((materialCode): PurchaseAnalysisRow | null => {
       const estimateItem = estimate.get(materialCode);
-      const analysisItem = analysis.get(materialCode);
       const pendingItem = pending.get(materialCode);
       const stockItem =
-        importedStock.get(materialCode) ?? existingStock.get(materialCode);
+        importedStock.get(materialCode) ??
+        (!detectedSources.stock ? existingStock.get(materialCode) : undefined);
 
       const calculatedNeed = cleanNumber(
-        estimateItem?.calculatedNeed ??
-          estimateItem?.quantity ??
-          analysisItem?.calculatedNeed ??
-          0,
+        estimateItem?.calculatedNeed ?? estimateItem?.quantity ?? 0,
       );
-      const confirmedNeed = cleanNumber(
-        analysisItem?.confirmedNeed ??
-          analysisItem?.calculatedNeed ??
-          calculatedNeed,
-      );
-      const stock = cleanNumber(
-        stockItem?.stock ?? analysisItem?.stock ?? 0,
-      );
+      const confirmedNeed = calculatedNeed;
+      const stock = cleanNumber(stockItem?.stock ?? 0);
       const pendingDetected = cleanNumber(
         pendingItem?.pendingDetected ??
           pendingItem?.quantity ??
-          analysisItem?.pendingDetected ??
           0,
       );
       const confirmedPending = cleanNumber(
-        analysisItem?.confirmedPending ??
-          pendingItem?.pendingEligible ??
-          pendingDetected,
+        pendingItem?.pendingEligible ?? pendingDetected,
       );
       if (
         calculatedNeed <= 0 &&
@@ -313,7 +464,6 @@ export function parsePurchaseWorkbook(
         return null;
 
       const materialName =
-        analysisItem?.materialName ||
         stockItem?.materialName ||
         pendingItem?.materialName ||
         estimateItem?.materialName ||
@@ -348,14 +498,12 @@ export function parsePurchaseWorkbook(
       depots: item.depots,
     }));
 
-  if (!estimate.size && !analysis.size)
-    diagnostics.push(
-      "No se encontró una hoja ESTIMADO ni una hoja ANALISIS con necesidades.",
-    );
-  if (!importedStock.size && !currentStock.length)
+  if (!detectedSources.estimate || !estimate.size)
+    diagnostics.push("No se encontró un archivo ESTIMADO con necesidades.");
+  if (!detectedSources.stock || !importedStock.size)
     diagnostics.push("No se encontró stock para cruzar con la necesidad.");
-  if (!pending.size && !analysis.size)
-    diagnostics.push("No se encontró una hoja PENDIENTE.");
+  if (!detectedSources.pending || !pending.size)
+    diagnostics.push("No se encontró un archivo PENDIENTE.");
   const latePendingMaterials = [...pending.values()].filter(
     (item) =>
       cleanNumber(item.pendingDetected ?? 0) >
@@ -376,6 +524,7 @@ export function parsePurchaseWorkbook(
         .filter((name) => /20\d{2}/.test(name))
         .join(" · "),
     diagnostics,
+    detectedSources,
   };
 }
 
@@ -398,57 +547,32 @@ export function mergeSavedConfirmations(
   });
 }
 
-function parseAnalysisRow(row: Record<string, unknown>): PartialMaterial | null {
-  const code = materialCodeFromRow(row);
-  if (!code) return null;
-  return {
-    materialCode: code,
-    materialName: materialNameFromRow(row),
-    calculatedNeed: numericValue(row, [
-      "necesidad calculada",
-      "necesidad total",
-      "requerimiento",
-      "necesidad",
-    ]),
-    confirmedNeed: optionalNumericValue(row, [
-      "necesidad confirmada",
-      "necesidad ajustada",
-      "necesidad analisis",
-    ]),
-    stock: optionalNumericValue(row, [
-      "stock",
-      "existencia",
-      "disponible",
-    ]),
-    pendingDetected: optionalNumericValue(row, [
-      "pendiente detectado",
-      "pendiente",
-      "por llegar",
-    ]),
-    confirmedPending: optionalNumericValue(row, [
-      "pendiente confirmado",
-      "pendiente ajustado",
-      "pendiente analisis",
-    ]),
-  };
-}
-
 function parsePendingRow(
   row: Record<string, unknown>,
   planningEnd: Date | null,
 ): PartialMaterial | null {
   const code = materialCodeFromRow(row);
   if (!code) return null;
-  const quantity = numericValue(row, [
+  const reportedBalance = valueFor(row, [
+    "suma de c por d e",
+    "c por d e",
+  ]);
+  const hasReportedBalance =
+    reportedBalance !== undefined &&
+    reportedBalance !== null &&
+    String(reportedBalance).trim() !== "";
+  const quantity = hasReportedBalance
+    ? Math.max(0, -parseLocalizedNumber(reportedBalance))
+    : numericValue(row, [
     "pendiente confirmado",
     "cantidad pendiente",
     "pendiente",
     "por recibir",
-    "cantidad",
     "saldo",
-  ]);
+      ]);
   const deliveryDate = dateValue(row, [
     "fecha entrega",
+    "f entr",
     "fecha prevista",
     "fecha estimada",
     "fecha arribo",
@@ -458,6 +582,7 @@ function parsePendingRow(
     "arribo",
   ]);
   const arrivesWithinPeriod =
+    hasReportedBalance ||
     !deliveryDate ||
     !planningEnd ||
     deliveryDate.getTime() <= planningEnd.getTime();
@@ -480,6 +605,7 @@ function parseStockRow(row: Record<string, unknown>): PartialMaterial | null {
     "disponible",
     "cantidad",
     "saldo",
+    "total",
   ]);
   const depots: Record<string, number> = {};
   const namedDepot = String(
@@ -547,6 +673,7 @@ function parseEstimatedProductRow(
   row: Record<string, unknown>,
 ): PartialMaterial[] {
   let bottles = numericValue(row, [
+    "total botellas",
     "botellas estimadas",
     "cantidad botellas",
     "botellas",
@@ -562,7 +689,11 @@ function parseEstimatedProductRow(
     }, 0);
   }
   if (!bottles) return [];
-  const cases = numericValue(row, ["cajas", "cantidad cajas"]);
+  const cases = numericValue(row, [
+    "total cajas",
+    "cantidad cajas",
+    "cajas estimadas",
+  ]);
   const unitsPerCase =
     numericValue(row, [
       "cj x",
@@ -654,6 +785,7 @@ function cleanNumber(value: number) {
 
 function materialCodeFromRow(row: Record<string, unknown>) {
   const direct = valueFor(row, [
+    "producto c",
     "codigo de insumo",
     "codigo insumo",
     "cod insumo",
@@ -668,6 +800,7 @@ function materialCodeFromRow(row: Record<string, unknown>) {
 
 function materialNameFromRow(row: Record<string, unknown>) {
   return textValue(row, [
+    "descripcion producto c",
     "nombre del insumo",
     "nombre insumo",
     "descripcion",
@@ -685,16 +818,6 @@ function numericValue(row: Record<string, unknown>, aliases: string[]) {
   return parseLocalizedNumber(valueFor(row, aliases));
 }
 
-function optionalNumericValue(
-  row: Record<string, unknown>,
-  aliases: string[],
-) {
-  const value = valueFor(row, aliases);
-  return value === undefined || value === null || String(value).trim() === ""
-    ? undefined
-    : parseLocalizedNumber(value);
-}
-
 function valueFor(row: Record<string, unknown>, aliases: string[]) {
   const normalizedAliases = aliases.map(normalizeText);
   const entries = Object.entries(row);
@@ -709,6 +832,83 @@ function valueFor(row: Record<string, unknown>, aliases: string[]) {
     if (partial) return partial[1];
   }
   return undefined;
+}
+
+function headerText(value: unknown) {
+  if (value instanceof Date && !Number.isNaN(value.getTime()))
+    return value.toISOString().slice(0, 10);
+  return String(value ?? "").trim();
+}
+
+function findHeaderRow(matrix: unknown[][], required: string[]) {
+  const normalizedRequired = required.map(normalizeText);
+  return matrix.findIndex((row) => {
+    const headers = row.map((cell) => normalizeText(String(cell ?? "")));
+    return normalizedRequired.every((requiredHeader) =>
+      headers.some(
+        (header) =>
+          header === requiredHeader || header.includes(requiredHeader),
+      ),
+    );
+  });
+}
+
+function bestHeaderRow(matrix: unknown[][]) {
+  const signals = [
+    "codigo",
+    "producto c",
+    "insumo",
+    "descripcion",
+    "variedad",
+    "stock",
+    "total",
+    "pendiente",
+    "c por d e",
+    "cant oc",
+    "necesidad",
+  ];
+  let bestIndex = -1;
+  let bestScore = 0;
+  matrix.forEach((row, index) => {
+    const normalized = row.map((cell) =>
+      normalizeText(String(cell ?? "")),
+    );
+    const score = signals.filter((signal) =>
+      normalized.some(
+        (header) => header === signal || header.includes(signal),
+      ),
+    ).length;
+    if (score > bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  });
+  return bestScore >= 2 ? bestIndex : -1;
+}
+
+function recordsAfterHeader(
+  matrix: unknown[][],
+  rawHeaders: string[],
+  startIndex: number,
+) {
+  const counts = new Map<string, number>();
+  const headers = rawHeaders.map((header, index) => {
+    const base = header || `Columna ${index + 1}`;
+    const count = counts.get(base) ?? 0;
+    counts.set(base, count + 1);
+    return count ? `${base} ${count + 1}` : base;
+  });
+  const records: Record<string, unknown>[] = [];
+  for (let rowIndex = startIndex; rowIndex < matrix.length; rowIndex += 1) {
+    const source = matrix[rowIndex] ?? [];
+    if (!source.some((cell) => String(cell ?? "").trim() !== "")) continue;
+    const record: Record<string, unknown> = {};
+    headers.forEach((header, columnIndex) => {
+      record[header] = source[columnIndex] ?? "";
+    });
+    records.push(record);
+  }
+  return records;
 }
 
 function normalizeText(value: string) {
