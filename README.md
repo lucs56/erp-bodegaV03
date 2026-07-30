@@ -3,11 +3,13 @@
 ## Entrega simplificada de compras
 
 - Navegación operativa reducida a `Resumen`, `Programación`, `Stock`, `Análisis compras` y `Administración`.
-- `Análisis compras` se alimenta exclusivamente de los archivos ESTIMADO, STOCK y PENDIENTE seleccionados en una misma carga.
+- `Análisis compras` se alimenta exclusivamente de las hojas o archivos ESTIMADO, STOCK y PENDIENTE seleccionados en una misma carga. La hoja `Análisis` se ignora.
 - Google Sheets no interviene en el cálculo de compras.
-- Los códigos `30354` y `30354A` se consolidan como un único insumo.
+- Los códigos compatibles `30354`/`30354A` y `71684C`/`71684D` comparten stock y pendiente en una sola necesidad.
+- En compras, el stock disponible se calcula exclusivamente como Depósito 2 + C18.
+- Las correcciones de Necesidad confirmada y Pendiente confirmado se conservan al volver a cargar los Excel.
 - Fórmula aplicada: `Compra exacta = Necesidad confirmada - Stock - Pendiente confirmado`, con mínimo cero.
-- La compra recomendada se redondea siempre hacia arriba al próximo millar.
+- La compra recomendada se redondea siempre hacia arriba al próximo múltiplo de 10.000.
 - El saldo exportado se calcula como `Stock + Pendiente - Necesidad`; un valor negativo indica cuánto falta comprar.
 - El valor confirmado de necesidad y pendiente puede corregirse antes de guardar.
 - El resultado se guarda en Cloudflare D1 para que todos los usuarios vean el mismo cálculo.
@@ -18,7 +20,7 @@
 
 1. Abrir `Análisis compras`.
 2. Presionar `Cargar archivos`.
-3. Seleccionar juntos ESTIMADO, STOCK y PENDIENTE.
+3. Seleccionar un Excel con las hojas ESTIMADO, STOCK y PENDIENTE, o seleccionar juntos los tres archivos.
 4. Revisar la necesidad y el pendiente detectados.
 5. Si corresponde, confirmar ajustes, guardar y exportar el Excel.
 

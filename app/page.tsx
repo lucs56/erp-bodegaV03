@@ -14,6 +14,7 @@ import {
 } from "../lib/assistant";
 import {
   PURCHASE_ANALYSIS_COLUMNS,
+  mergeSavedConfirmations,
   parsePurchaseWorkbook,
   purchaseAnalysisExportRows,
   purchaseRecordsFromMatrix,
@@ -598,7 +599,7 @@ export default function Home() {
     const term = purchaseQuery.trim().toLocaleLowerCase("es");
     return term
       ? purchaseRows.filter((item) =>
-          `${item.materialCode} ${item.materialName}`
+          `${item.materialCode} ${(item.compatibleCodes ?? []).join(" ")} ${item.materialName}`
             .toLocaleLowerCase("es")
             .includes(term),
         )
@@ -961,14 +962,14 @@ export default function Home() {
       ].filter(Boolean);
       if (missingSources.length)
         throw new Error(
-          `Falta cargar ${missingSources.join(", ")}. Seleccioná juntos los tres archivos.`,
+          `Falta detectar ${missingSources.join(", ")}. El Excel debe incluir las hojas ESTIMADO, STOCK y PENDIENTE, o podés seleccionar los tres archivos por separado.`,
         );
       if (!parsed.rows.length)
         throw new Error(
           parsed.diagnostics[0] ||
             "No se encontraron insumos para analizar en los archivos.",
         );
-      const rows = parsed.rows;
+      const rows = mergeSavedConfirmations(parsed.rows, purchaseRows);
       const sourceFiles = selectedFiles.map((file) => file.name);
       setPurchaseRows(rows);
       setPurchaseSourceFiles(sourceFiles);
@@ -3029,15 +3030,16 @@ export default function Home() {
             <p className="purchase-analysis-help">
               El análisis se calcula únicamente con los archivos ESTIMADO,
               STOCK y PENDIENTE. Los valores confirmados permiten reflejar un
-              ajuste operativo antes de exportar.
+              ajuste operativo antes de exportar. Los códigos compatibles
+              comparten el stock de Depósito 2 y C18 sin duplicar la necesidad.
             </p>
 
             {!purchaseRows.length ? (
               <article className="empty-consumption">
                 <h2>Cargá los datos para iniciar el análisis</h2>
                 <p>
-                  Seleccioná juntos los archivos ESTIMADO, STOCK y PENDIENTE.
-                  La aplicación reconoce automáticamente sus columnas y cruza
+                  Seleccioná un Excel que contenga las hojas ESTIMADO, STOCK y PENDIENTE o, en una sola carga, los tres archivos por separado.
+                  La hoja Análisis se ignora. La aplicación reconoce automáticamente sus columnas y cruza
                   necesidad, existencias y entregas pendientes.
                 </p>
                 <button
@@ -3093,6 +3095,11 @@ export default function Home() {
                           <td className="purchase-material-cell">
                             <strong>{item.materialCode}</strong>
                             <span>{item.materialName}</span>
+                            {(item.compatibleCodes?.length ?? 0) > 1 && (
+                              <small>
+                                Stock compartido: {item.compatibleCodes?.join(" + ")}
+                              </small>
+                            )}
                           </td>
                           <td>
                             {formatPurchaseNumber(item.calculatedNeed)}

@@ -20,6 +20,7 @@ export const PURCHASE_ANALYSIS_EXPORT_COLUMNS = [
 
 export type PurchaseAnalysisRow = {
   materialCode: string;
+  compatibleCodes?: string[];
   materialName: string;
   calculatedNeed: number;
   confirmedNeed: number;
@@ -57,7 +58,9 @@ export function purchaseAnalysisExportRows(rows: PurchaseAnalysisRow[]) {
   return [
     [...PURCHASE_ANALYSIS_EXPORT_COLUMNS],
     ...rows.map((row) => [
-      row.materialCode,
+      row.compatibleCodes?.length
+        ? row.compatibleCodes.join(" / ")
+        : row.materialCode,
       row.materialName,
       row.stock,
       row.confirmedPending,
@@ -85,6 +88,7 @@ export type PurchaseStockItem = {
 
 type PartialMaterial = {
   materialCode: string;
+  compatibleCodes?: string[];
   materialName: string;
   category?: string;
   unit?: string;
@@ -97,6 +101,11 @@ type PartialMaterial = {
   pendingEligible?: number;
   confirmedPending?: number;
 };
+
+export const SHARED_MATERIAL_CODE_GROUPS = [
+  ["30354", "30354A"],
+  ["71684C", "71684D"],
+] as const;
 
 const MONTH_HEADERS = [
   "enero",
@@ -205,54 +214,14 @@ export function purchaseRecordsFromMatrix(
     const pendingHeaders = (matrix[pendingHeaderIndex] ?? []).map(
       (cell, index) => headerText(cell) || `Columna ${index + 1}`,
     );
-    const mainRecords = recordsAfterHeader(
+    // La tabla dinámica auxiliar que aparece a la derecha no es una fuente:
+    // netea saldos positivos y negativos y puede alterar el pendiente real.
+    // Se usan exclusivamente las filas operativas de Producto/C y C.por D./E.
+    return recordsAfterHeader(
       matrix,
       pendingHeaders,
       pendingHeaderIndex + 1,
     );
-    const descriptions = new Map<string, string>();
-    for (const row of mainRecords) {
-      const code = materialCodeFromRow(row);
-      if (code) descriptions.set(code, materialNameFromRow(row));
-    }
-
-    const pivotHeaderIndex = matrix
-      .slice(pendingHeaderIndex + 1, pendingHeaderIndex + 8)
-      .findIndex((row) =>
-        row.some((cell) =>
-          normalizeText(String(cell ?? "")).includes("etiquetas de fila"),
-        ),
-      );
-    if (pivotHeaderIndex >= 0) {
-      const absolutePivotHeaderIndex =
-        pendingHeaderIndex + 1 + pivotHeaderIndex;
-      const pivotHeader = matrix[absolutePivotHeaderIndex] ?? [];
-      const codeColumn = pivotHeader.findIndex((cell) =>
-        normalizeText(String(cell ?? "")).includes("etiquetas de fila"),
-      );
-      const balanceColumn = pivotHeader.findIndex((cell) =>
-        normalizeText(String(cell ?? "")).includes("suma de c por d e"),
-      );
-      if (codeColumn >= 0 && balanceColumn >= 0) {
-        const pivotRecords: Record<string, unknown>[] = [];
-        for (
-          let rowIndex = absolutePivotHeaderIndex + 1;
-          rowIndex < matrix.length;
-          rowIndex += 1
-        ) {
-          const row = matrix[rowIndex] ?? [];
-          const code = canonicalMaterialCode(row[codeColumn]);
-          if (!code) continue;
-          pivotRecords.push({
-            "Producto/C": code,
-            "Descripcion Producto/C": descriptions.get(code) ?? "",
-            "C.por D./E.": row[balanceColumn],
-          });
-        }
-        if (pivotRecords.length) return pivotRecords;
-      }
-    }
-    return mainRecords;
   }
 
   const headerIndex = bestHeaderRow(matrix.slice(0, 20));
@@ -300,13 +269,26 @@ export function canonicalMaterialCode(value: unknown): string {
     .toLocaleUpperCase("es")
     .replace(/\s+/g, "");
   if (!raw || raw === "-" || raw === "N/A" || raw === "NA") return "";
-  if (
-    raw === "30354" ||
-    raw === "30354A" ||
-    (raw.includes("30354") && raw.includes("30354A"))
-  )
-    return "30354A";
   return raw;
+}
+
+export function compatibleMaterialCodes(value: unknown): string[] {
+  const rawValues = Array.isArray(value)
+    ? value
+    : String(value ?? "")
+        .split(/[+/|]/)
+        .map((item) => item.trim());
+  const codes = [...new Set(rawValues.map(canonicalMaterialCode).filter(Boolean))];
+  if (!codes.length) return [];
+  for (const group of SHARED_MATERIAL_CODE_GROUPS) {
+    if (codes.some((code) => (group as readonly string[]).includes(code)))
+      return [...group];
+  }
+  return codes;
+}
+
+export function purchaseMaterialGroupKey(value: unknown): string {
+  return compatibleMaterialCodes(value).join("|");
 }
 
 export function calculatePurchase(
@@ -325,7 +307,7 @@ export function calculatePurchase(
   return {
     exactPurchase,
     roundedPurchase:
-      exactPurchase > 0 ? Math.ceil(exactPurchase / 1000) * 1000 : 0,
+      exactPurchase > 0 ? Math.ceil(exactPurchase / 10_000) * 10_000 : 0,
   };
 }
 
@@ -336,8 +318,13 @@ function roundOperationalNumber(value: number) {
 export function recalculatePurchaseRow(
   row: PurchaseAnalysisRow,
 ): PurchaseAnalysisRow {
+  const compatibleCodes = compatibleMaterialCodes(
+    row.compatibleCodes?.length ? row.compatibleCodes : row.materialCode,
+  );
+  const { compatibleCodes: _discardedCodes, ...baseRow } = row;
   return {
-    ...row,
+    ...baseRow,
+    ...(compatibleCodes.length > 1 ? { compatibleCodes } : {}),
     confirmedNeed: cleanNumber(row.confirmedNeed),
     stock: cleanNumber(row.stock),
     confirmedPending: cleanNumber(row.confirmedPending),
@@ -359,6 +346,8 @@ export function parsePurchaseWorkbook(
   const estimate = new Map<string, PartialMaterial>();
   const pending = new Map<string, PartialMaterial>();
   const importedStock = new Map<string, PartialMaterial>();
+  // La hoja "Análisis" es una salida calculada y nunca se usa como fuente.
+  // Las únicas fuentes válidas son ESTIMADO, STOCK y PENDIENTE.
   const periodNames = new Set<string>();
   const planningEnd = detectPlanningEnd(sheets);
   const detectedSources: PurchaseWorkbookSources = {
@@ -385,7 +374,10 @@ export function parsePurchaseWorkbook(
     if (MONTH_HEADERS.some((month) => sheetName.includes(month)))
       periodNames.add(sheet.name.trim());
 
-    if (classifiedName.includes("analisis")) continue;
+    if (classifiedName.includes("analisis")) {
+      diagnostics.push(`Se ignoró la hoja calculada "${sheet.name}".`);
+      continue;
+    }
     if (classifiedName.includes("pendient")) {
       detectedSources.pending = true;
       for (const row of sheet.rows)
@@ -417,9 +409,9 @@ export function parsePurchaseWorkbook(
       }
       continue;
     }
-    // ANALISIS es el resultado manual de referencia, no una fuente operativa.
-    // El cálculo productivo se alimenta exclusivamente de los tres reportes.
+    // Las hojas sin un nombre reconocible no se consideran fuentes.
   }
+
 
   const existingStock = new Map<string, PartialMaterial>();
   for (const item of currentStock)
@@ -432,29 +424,70 @@ export function parsePurchaseWorkbook(
       depots: item.depots,
     });
 
-  // Solo se analizan insumos requeridos por ESTIMADO. STOCK y PENDIENTE son
-  // fuentes de cruce y no deben agregar materiales ajenos al plan de compra.
-  const codes = new Set(estimate.keys());
-  const rows = [...codes]
-    .map((materialCode): PurchaseAnalysisRow | null => {
-      const estimateItem = estimate.get(materialCode);
-      const pendingItem = pending.get(materialCode);
-      const stockItem =
-        importedStock.get(materialCode) ??
-        (!detectedSources.stock ? existingStock.get(materialCode) : undefined);
+  // Solo se analizan insumos requeridos por ESTIMADO. Algunos códigos son
+  // físicamente compatibles y comparten disponibilidad. En esos casos se
+  // genera una sola necesidad y se suma el stock/pendiente de todo el grupo.
+  const estimateGroups = new Map<
+    string,
+    { compatibleCodes: string[]; requestedCodes: string[]; item: PartialMaterial }
+  >();
+  for (const [materialCode, estimateItem] of estimate) {
+    const compatibleCodes = compatibleMaterialCodes(materialCode);
+    const groupKey = compatibleCodes.join("|");
+    const previous = estimateGroups.get(groupKey);
+    if (!previous) {
+      estimateGroups.set(groupKey, {
+        compatibleCodes,
+        requestedCodes: [materialCode],
+        item: { ...estimateItem },
+      });
+      continue;
+    }
+    previous.requestedCodes.push(materialCode);
+    previous.item = {
+      ...previous.item,
+      materialName: previous.item.materialName || estimateItem.materialName,
+      calculatedNeed: optionalSum(
+        previous.item.calculatedNeed,
+        estimateItem.calculatedNeed,
+      ),
+      quantity: optionalSum(previous.item.quantity, estimateItem.quantity),
+    };
+  }
+
+  const rows = [...estimateGroups.values()]
+    .map(({ compatibleCodes, requestedCodes, item: estimateItem }): PurchaseAnalysisRow | null => {
+      const stockCandidates = compatibleCodes
+        .map(
+          (code) =>
+            importedStock.get(code) ??
+            (!detectedSources.stock ? existingStock.get(code) : undefined),
+        )
+        .filter((item): item is PartialMaterial => Boolean(item));
+      const pendingCandidates = compatibleCodes
+        .map((code) => pending.get(code))
+        .filter((item): item is PartialMaterial => Boolean(item));
 
       const calculatedNeed = cleanNumber(
         estimateItem?.calculatedNeed ?? estimateItem?.quantity ?? 0,
       );
       const confirmedNeed = calculatedNeed;
-      const stock = cleanNumber(stockItem?.stock ?? 0);
-      const pendingDetected = cleanNumber(
-        pendingItem?.pendingDetected ??
-          pendingItem?.quantity ??
-          0,
+      const stock = stockCandidates.reduce(
+        (total, item) => total + cleanNumber(item.stock ?? item.quantity ?? 0),
+        0,
       );
-      const confirmedPending = cleanNumber(
-        pendingItem?.pendingEligible ?? pendingDetected,
+      const pendingDetected = pendingCandidates.reduce(
+        (total, item) =>
+          total + cleanNumber(item.pendingDetected ?? item.quantity ?? 0),
+        0,
+      );
+      const confirmedPending = pendingCandidates.reduce(
+        (total, item) =>
+          total +
+          cleanNumber(
+            item.pendingEligible ?? item.pendingDetected ?? item.quantity ?? 0,
+          ),
+        0,
       );
       if (
         calculatedNeed <= 0 &&
@@ -463,13 +496,23 @@ export function parsePurchaseWorkbook(
       )
         return null;
 
+      const preferredCode = requestedCodes[0] ?? compatibleCodes[0] ?? "";
+      const preferredStock =
+        importedStock.get(preferredCode) ?? existingStock.get(preferredCode);
+      const preferredPending = pending.get(preferredCode);
       const materialName =
-        stockItem?.materialName ||
-        pendingItem?.materialName ||
+        preferredStock?.materialName ||
+        preferredPending?.materialName ||
         estimateItem?.materialName ||
+        stockCandidates[0]?.materialName ||
+        pendingCandidates[0]?.materialName ||
         "Sin descripción";
       return recalculatePurchaseRow({
-        materialCode,
+        materialCode:
+          compatibleCodes.length > 1
+            ? compatibleCodes.join(" / ")
+            : compatibleCodes[0] || preferredCode,
+        compatibleCodes,
         materialName,
         calculatedNeed,
         confirmedNeed,
@@ -532,11 +575,19 @@ export function mergeSavedConfirmations(
   importedRows: PurchaseAnalysisRow[],
   savedRows: PurchaseAnalysisRow[],
 ) {
-  const saved = new Map(
-    savedRows.map((row) => [canonicalMaterialCode(row.materialCode), row]),
-  );
+  const saved = new Map<string, PurchaseAnalysisRow>();
+  for (const row of savedRows) {
+    const key = purchaseMaterialGroupKey(
+      row.compatibleCodes?.length ? row.compatibleCodes : row.materialCode,
+    );
+    if (key) saved.set(key, row);
+  }
   return importedRows.map((row) => {
-    const previous = saved.get(canonicalMaterialCode(row.materialCode));
+    const previous = saved.get(
+      purchaseMaterialGroupKey(
+        row.compatibleCodes?.length ? row.compatibleCodes : row.materialCode,
+      ),
+    );
     return previous
       ? recalculatePurchaseRow({
           ...row,
@@ -562,7 +613,7 @@ function parsePendingRow(
     reportedBalance !== null &&
     String(reportedBalance).trim() !== "";
   const quantity = hasReportedBalance
-    ? Math.max(0, -parseLocalizedNumber(reportedBalance))
+    ? Math.max(0, parseLocalizedNumber(reportedBalance))
     : numericValue(row, [
     "pendiente confirmado",
     "cantidad pendiente",
@@ -614,14 +665,21 @@ function parseStockRow(row: Record<string, unknown>): PartialMaterial | null {
     )?.[1] ?? "",
   ).trim();
   if (namedDepot && quantity) depots[namedDepot.trim().toUpperCase()] = quantity;
-  const depotTotal = Object.entries(row).reduce((total, [header, value]) => {
+  let hasOperationalDepotColumns = false;
+  const operationalDepotTotal = Object.entries(row).reduce((total, [header, value]) => {
     const depot = depotCodeFromHeader(header);
     if (!depot) return total;
     const depotQuantity = parseLocalizedNumber(value);
     depots[depot] = depotQuantity;
-    return total + depotQuantity;
+    if (depot === "2" || depot === "C18") {
+      hasOperationalDepotColumns = true;
+      return total + depotQuantity;
+    }
+    return total;
   }, 0);
-  if (!quantity) quantity = depotTotal;
+  // Para compras se considera exclusivamente el stock utilizable de
+  // Depósito 2 + C18. Si esas columnas no existen, se usa el total informado.
+  if (hasOperationalDepotColumns) quantity = operationalDepotTotal;
   return {
     materialCode: code,
     materialName: materialNameFromRow(row),

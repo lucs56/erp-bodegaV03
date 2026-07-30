@@ -6,6 +6,7 @@ import type {
 } from "./purchase-analysis";
 import {
   canonicalMaterialCode,
+  compatibleMaterialCodes,
   recalculatePurchaseRow,
 } from "./purchase-analysis";
 
@@ -78,10 +79,20 @@ function validateRows(value: unknown): PurchaseAnalysisRow[] {
     .map((item): PurchaseAnalysisRow | null => {
       if (!item || typeof item !== "object") return null;
       const row = item as Partial<PurchaseAnalysisRow>;
-      const materialCode = canonicalMaterialCode(row.materialCode);
+      const compatibleCodes = compatibleMaterialCodes(
+        Array.isArray(row.compatibleCodes) && row.compatibleCodes.length
+          ? row.compatibleCodes
+          : row.materialCode,
+      );
+      const materialCode =
+        compatibleCodes.length > 1
+          ? compatibleCodes.join(" / ")
+          : canonicalMaterialCode(row.materialCode);
       if (!materialCode) return null;
       return recalculatePurchaseRow({
         materialCode,
+        compatibleCodes:
+          compatibleCodes.length > 1 ? compatibleCodes.slice(0, 10) : undefined,
         materialName: String(row.materialName || "Sin descripción").slice(
           0,
           240,
